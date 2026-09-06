@@ -28,6 +28,7 @@
       moonDark: '#2b3459',    // 月亮暗面
       glow: '#f4ecd8',        // 月晕色
       star: '#cdd6ec',        // 星星
+      starPeak: '#f4f7ff',    // 星星闪烁波的峰值色（走满一圈时，配合放大与不透明度 1，明显比平时亮）
       ring: '#8d98c4',        // 相位环虚线色
       hillFar: '#2a335c',     // 远山
       hillMid: '#222a4e',     // 中山
@@ -45,6 +46,7 @@
       moonDark: '#3a3260',
       glow: '#f6e8cf',
       star: '#e0d7ee',
+      starPeak: '#fbf4ff',
       ring: '#a294c6',
       hillFar: '#3c3161',
       hillMid: '#322852',
@@ -62,6 +64,7 @@
       moonDark: '#24404a',
       glow: '#f0eeda',
       star: '#cfe0dd',
+      starPeak: '#effffa',
       ring: '#7fa1a3',
       hillFar: '#23424a',
       hillMid: '#1b353d',

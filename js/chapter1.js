@@ -3,7 +3,9 @@
  * 目标：月亮不是变大变小，是循环变化，一圈一圈。
  * 交互：拖着相位环上那颗发光的小月亮沿环滑动（在环的任何位置按住拖也行），
  *       中央大月亮的相位实时跟随；松手时轻轻吸附到最近的相位。
- * 过关：拖满完整一圈回到起点 → 小人抬头 → 星星从他身边起逐颗点亮 → 镜头回到他身上。
+ * 反馈：每经过一个相位节点，天空点亮一批星（走满一圈正好全亮）；
+ *       走满一圈的瞬间，闪烁波由月亮向外扩散、小人抬头 → 镜头落到小人身上，停 2 秒 → 缓缓拉回原构图，
+ *       拉回时星空回暗，可以直接再拖一圈。四角星在第一次通关时出现，之后一直留着。
  * 往返：开场镜头停在小人身上，再拉远到「宇宙视角」（整个循环）；结尾回到小人视角。
  *
  * 模式：intro（开场）→ play（可玩）→ win（过关演出）→ hold（停在小人身上）→ return（拉远）→ play …
@@ -23,6 +25,7 @@ window.Chapter1 = (function () {
   var snapHandle = null;
   var camera = null;           // 当前 viewBox
   var hinted = false;          // 本次会话里已经拖过了（光晕不再呼吸）
+  var litBatches = {};         // 本圈已点亮的星星批次（节点序号 → true）
 
   var progress = Store.get(KEY, {}) || {};
   if (!progress.chapter1) progress.chapter1 = { completed: false, laps: 0 };
@@ -61,11 +64,14 @@ window.Chapter1 = (function () {
     var oldP = M.phaseFromAngle(theta);
     theta = M.normAngle(theta - delta);
     net += delta;
-    // 经过某个相位小月亮时让它轻轻一跳
+    // 经过某个相位小月亮：它轻轻一跳，天空点亮一批星
     var dp = delta / TAU, adp = Math.abs(dp) + 1e-9;
     for (var i = 0; i < 8; i++) {
       var gap = dp > 0 ? frac(i / 8 - oldP) : frac(oldP - i / 8);
-      if (gap > 1e-9 && gap <= adp) scene.pulseMarker(i);
+      if (gap > 1e-9 && gap <= adp) {
+        scene.pulseMarker(i);
+        if (!litBatches[i]) { litBatches[i] = true; scene.lightBatch(i, true); }
+      }
     }
     render();
     if (Math.abs(net) >= TAU - P.win.lapEpsilon) win();
@@ -114,7 +120,8 @@ window.Chapter1 = (function () {
     if (dp > 0.5) dp -= 1;
     if (dp < -0.5) dp += 1;
     var total = dp * TAU;
-    if (Math.abs(total) < 1e-4) return;
+    if (Math.abs(total) < 1e-9) return;
+    if (Math.abs(total) < 0.01) { advance(total); return; }   // 只差一丁点：直接落到节点上（让「经过节点」的判定生效）
     var done = 0;
     snapHandle = track(Anim.tween({
       ms: P.ring.snapMs, ease: Anim.ease.out,
@@ -128,7 +135,6 @@ window.Chapter1 = (function () {
     mode = 'win';
     cancelAll();
     drag = null;
-    var first = !progress.chapter1.completed;
     progress.chapter1.completed = true;
     progress.chapter1.laps += 1;
     save();
@@ -138,12 +144,17 @@ window.Chapter1 = (function () {
     hinted = true;
     svg.classList.remove('hint');
 
-    var C = P.camera;
+    // 走满一圈的瞬间：剩下的星全部点亮（闪烁波会盖过点亮动画，所以直接亮），闪烁波由月亮向外扩散，四角星亮起，小人抬头
+    for (var i = 0; i < 8; i++) {
+      if (!litBatches[i]) { litBatches[i] = true; scene.lightBatch(i, false); }
+    }
+    scene.setSparklesLit(true, true);
+    scene.wave();
     track(Anim.tween({ ms: P.kid.lookUpMs, ease: Anim.ease.inOut, onUpdate: function (t) { scene.setKidLook(t); } }));
-    track(Anim.delay(300, function () {
-      if (first) scene.setStarsLit(true, true); else scene.twinkleStars();
-    }));
-    track(Anim.delay(300 + C.winDelayMs, function () {
+
+    // 闪烁波过后：镜头落到小人身上，停一会儿，再缓缓拉回
+    var C = P.camera;
+    track(Anim.delay(C.winDelayMs, function () {
       tweenCamera(scene.kidFrame(), C.winZoomMs, Anim.ease.inOut, function () {
         net = 0; render();                 // 镜头在小人身上时，悄悄把轨迹清掉、回到起点
         mode = 'hold';
@@ -155,6 +166,8 @@ window.Chapter1 = (function () {
     if (mode !== 'hold') return;
     mode = 'return';
     cancelAll();
+    litBatches = {};
+    scene.dimStars();                      // 新的一圈从暗夜开始，星星可以再次一批批点亮
     track(Anim.tween({ ms: P.kid.lookUpMs, ease: Anim.ease.inOut, onUpdate: function (t) { scene.setKidLook(1 - t); } }));
     tweenCamera(scene.fullFrame(), P.camera.returnZoomMs, Anim.ease.inOut, function () { mode = 'play'; });
   }
@@ -187,7 +200,8 @@ window.Chapter1 = (function () {
       svg.addEventListener('pointerup', onUp);
       svg.addEventListener('pointercancel', onUp);
     }
-    scene.setStarsLit(progress.chapter1.completed, false);
+    scene.setLitBatches(litBatches, false);
+    scene.setSparklesLit(progress.chapter1.completed, false);
     svg.classList.toggle('hint', !hinted);
     if (first) { render(); runIntro(); return; }
     // 重建：直接进入当前模式的终点状态
@@ -198,6 +212,7 @@ window.Chapter1 = (function () {
       track(Anim.delay(P.camera.holdMs, returnToPlay));
     } else {
       if (mode === 'win') { theta = HOME; net = 0; }
+      if (mode === 'win' || mode === 'return') { litBatches = {}; scene.setLitBatches(litBatches, false); scene.dimStars(); }
       mode = 'play';
       render();
       scene.setKidLook(0);
@@ -208,6 +223,6 @@ window.Chapter1 = (function () {
   return {
     attach: attach,
     // 供调试 / 测试读取
-    state: function () { return { mode: mode, theta: theta, net: net, phase: M.phaseFromAngle(theta), progress: progress.chapter1 }; }
+    state: function () { return { mode: mode, theta: theta, net: net, phase: M.phaseFromAngle(theta), lit: Object.keys(litBatches).length, progress: progress.chapter1 }; }
   };
 })();

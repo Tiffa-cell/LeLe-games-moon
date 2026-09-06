@@ -38,24 +38,54 @@ body {
 .sky-bottom { stop-color: var(--c-sky-bottom); transition: stop-color .7s; }
 .glow-stop  { stop-color: var(--c-glow);       transition: stop-color .7s; }
 
-/* ---- 星：未过关时很暗，过关后逐颗点亮 */
+/* ---- 星：平时很暗；经过相位节点时一批批从暗到亮；走满一圈时闪烁波由月亮向外扩散 */
+.star, .sparkle {
+  transform-box: fill-box;
+  transform-origin: center;
+}
 .star {
   fill: var(--c-star);
   opacity: calc(var(--op) * var(--star-dim));
-  transition: opacity var(--star-light-ms) ease-out;
+  transition: opacity var(--star-light-ms) ease-out, transform var(--star-light-ms) ease-out;
 }
-.sky-lit .star { opacity: var(--op); }
-.star.twinkle { animation: twinkle .9s ease-in-out var(--delay) both; }
-@keyframes twinkle {
-  0%, 100% { opacity: var(--op); }
-  45%      { opacity: 1; }
+.star.lit {                                    /* 常亮：比概念稿再亮一点、大一点，和暗星拉开差距 */
+  opacity: calc(var(--op) * var(--star-lit-boost));
+  transform: scale(var(--star-lit-scale));
 }
-.sparkle {
+.star.ignite {                                 /* 经过节点时点亮：先闪到峰值，再落到常亮 */
+  animation: ignite var(--ignite-ms) ease-out var(--ignite-delay) both;
+}
+@keyframes ignite {
+  0%   { opacity: calc(var(--op) * var(--star-dim)); transform: scale(1); fill: var(--c-star); }
+  65%  { opacity: 1; transform: scale(var(--ignite-scale)); fill: var(--c-star-peak); }
+  100% { opacity: calc(var(--op) * var(--star-lit-boost)); transform: scale(var(--star-lit-scale)); fill: var(--c-star); }
+}
+.sky-reset .star {                            /* 镜头拉回时星空慢慢回暗 */
+  transition-duration: var(--star-reset-ms);
+  transition-timing-function: ease-in-out;
+}
+.sparkle {                                     /* 四角星：第一次通关时出现，之后一直留着 */
+  --star-lit-boost: 1;                         /* 四角星本身够大，常亮时不再加亮放大 */
+  --star-lit-scale: 1;
   fill: var(--c-star);
   opacity: 0;
   transition: opacity .9s ease-out;
 }
-.sky-lit .sparkle { opacity: var(--op); }
+.sparkle.lit { opacity: var(--op); }
+.star.wave, .sparkle.wave {
+  animation: wave var(--wave-flash-ms) ease-in-out var(--wave-delay) both;
+}
+@keyframes wave {                              /* 峰值：不透明度 1 + 放大 + 换成更亮的峰值色 */
+  0%   { opacity: calc(var(--op) * var(--star-lit-boost)); transform: scale(var(--star-lit-scale)); fill: var(--c-star); }
+  40%  { opacity: 1; transform: scale(var(--star-peak-scale)); fill: var(--c-star-peak); }
+  100% { opacity: calc(var(--op) * var(--star-lit-boost)); transform: scale(var(--star-lit-scale)); fill: var(--c-star); }
+}
+.moon-glow.surge { animation: surge 1.2s ease-out; }
+@keyframes surge {
+  0%   { opacity: var(--glow-min); }
+  25%  { opacity: 1; }
+  100% { opacity: var(--glow-min); }
+}
 
 /* ---- 月亮（主月亮与环上的小月亮共用一套） */
 .moon-lit, .m-lit       { fill: var(--c-moon);        transition: fill .7s; }
