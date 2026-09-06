@@ -66,7 +66,15 @@ window.Scene = (function () {
     // 非颜色参数 → CSS 变量
     var rs = document.documentElement.style;
     rs.setProperty('--star-dim', P.stars.dim);
+    rs.setProperty('--star-lit-boost', P.stars.litBoost);
+    rs.setProperty('--star-lit-scale', P.stars.litScale);
     rs.setProperty('--star-light-ms', P.stars.lightMs + 'ms');
+    rs.setProperty('--star-reset-ms', P.stars.resetMs + 'ms');
+    rs.setProperty('--ignite-ms', (P.stars.lightMs + P.stars.igniteSettleMs) + 'ms');
+    rs.setProperty('--ignite-scale', P.stars.igniteScale);
+    rs.setProperty('--star-peak-scale', P.stars.peakScale);
+    rs.setProperty('--wave-flash-ms', P.stars.waveFlashMs + 'ms');
+    rs.setProperty('--glow-min', P.moon.glowMinRatio);
     rs.setProperty('--crater-alpha', P.moon.craterAlpha);
     rs.setProperty('--ring-alpha', P.ring.alpha);
     rs.setProperty('--trail-alpha', P.ring.trailAlpha);
@@ -113,12 +121,25 @@ window.Scene = (function () {
       var sz = 9 + R() * 6; op = 0.5 + R() * 0.4;
       var sp = el('path', { d: sparklePath(x, y, sz), 'class': 'sparkle' }, lStars);
       sp.style.setProperty('--op', op.toFixed(2));
-      sparkles.push(sp);
+      sparkles.push({ el: sp, x: x, y: y });
     }
-    // 点亮顺序：离小人近的先亮，像从他身边一路亮到天边
-    var starOrder = stars.slice().sort(function (a, b) {
-      return Math.hypot(a.x - px, a.y - pb) - Math.hypot(b.x - px, b.y - pb);
-    }).map(function (s) { return s.el; });
+    var allStars = stars.concat(sparkles);
+    // 闪烁波：离月亮越远的星越晚闪，于是看起来由月亮向外扩散（最近的那颗立刻闪，最远的在 waveSpreadMs 后）
+    var minD = Infinity, maxD = 0;
+    allStars.forEach(function (s) { s.d = Math.hypot(s.x - cx, s.y - cy); minD = Math.min(minD, s.d); maxD = Math.max(maxD, s.d); });
+    allStars.forEach(function (s) {
+      var t = maxD > minD ? (s.d - minD) / (maxD - minD) : 0;
+      s.el.style.setProperty('--wave-delay', Math.round(t * P.stars.waveSpreadMs) + 'ms');
+    });
+    // 八批星星：按绕月亮的方位角平分成 8 份，第 i 批大致在第 i 个相位节点那一侧。
+    // 小月亮经过节点 i 就点亮第 i 批 —— 星空跟着手指绕一圈亮起来，走满一圈正好全亮
+    function angleKey(s) { return (M.phaseFromAngle(Math.atan2(s.y - cy, s.x - cx)) + 1 / 16) % 1; }
+    var byAngle = stars.slice().sort(function (a, b) { return angleKey(a) - angleKey(b); });
+    var batches = [];
+    for (var b = 0; b < 8; b++) {
+      batches.push(byAngle.slice(Math.floor(b * byAngle.length / 8), Math.floor((b + 1) * byAngle.length / 8))
+                          .map(function (s) { return s.el; }));
+    }
 
     // ---- 3 月晕
     var lGlow = el('g', { 'class': 'layer layer-glow' }, svg);
@@ -199,7 +220,7 @@ window.Scene = (function () {
       svg.__sceneBound = true;
       svg.addEventListener('animationend', function (e) {
         var t = e.target;
-        if (t && t.classList) { t.classList.remove('pulse'); t.classList.remove('twinkle'); }
+        if (t && t.classList) { t.classList.remove('pulse'); t.classList.remove('ignite'); t.classList.remove('wave'); t.classList.remove('surge'); }
       });
     }
 
@@ -252,24 +273,46 @@ window.Scene = (function () {
       g.classList.add('pulse');
     }
 
-    function setStarsLit(lit, animate) {
-      if (!animate) svg.classList.add('no-anim');
-      starOrder.forEach(function (s, i) { s.style.transitionDelay = animate ? (i * P.stars.staggerMs) + 'ms' : '0ms'; });
-      sparkles.forEach(function (s, j) { s.style.transitionDelay = animate ? (starOrder.length * P.stars.staggerMs + j * 160) + 'ms' : '0ms'; });
-      svg.classList.toggle('sky-lit', !!lit);
-      if (!animate) {
-        void svg.getBoundingClientRect();
-        requestAnimationFrame(function () { svg.classList.remove('no-anim'); });
-      }
+    function instantly(fn) {              // 不带过渡地改状态（重建场景时恢复）
+      svg.classList.add('no-anim');
+      fn();
+      void svg.getBoundingClientRect();
+      requestAnimationFrame(function () { svg.classList.remove('no-anim'); });
     }
-
-    function twinkleStars() {             // 已经亮着的星空：逐颗轻轻闪一下
-      starOrder.forEach(function (s, i) {
-        s.style.setProperty('--delay', (i * P.stars.staggerMs) + 'ms');
-        s.classList.remove('twinkle');
-        void s.getBoundingClientRect();
-        s.classList.add('twinkle');
+    function lightBatch(i, animate) {     // 经过相位节点 i：这一批星星逐颗点亮（animate：带闪一下的点亮动画）
+      (batches[i] || []).forEach(function (s, k) {
+        s.style.transitionDelay = '0ms';
+        if (animate) {
+          s.style.setProperty('--ignite-delay', (k * P.stars.batchStaggerMs) + 'ms');
+          s.classList.remove('ignite');
+          void s.getBoundingClientRect();
+          s.classList.add('ignite');
+        }
+        s.classList.add('lit');
       });
+    }
+    function setLitBatches(map, animate) {
+      var apply = function () { for (var i = 0; i < 8; i++) if (map[i]) lightBatch(i, animate); };
+      if (animate) apply(); else instantly(apply);
+    }
+    function dimStars() {                 // 新的一圈从暗夜开始：星空慢慢暗下来
+      svg.classList.add('sky-reset');
+      stars.forEach(function (s, k) { s.el.style.transitionDelay = ((k % 12) * 40) + 'ms'; s.el.classList.remove('lit'); s.el.classList.remove('ignite'); });
+      setTimeout(function () { svg.classList.remove('sky-reset'); }, P.stars.resetMs + 600);
+    }
+    function setSparklesLit(lit, animate) {
+      var apply = function () { sparkles.forEach(function (s) { s.el.classList.toggle('lit', !!lit); }); };
+      if (animate) apply(); else instantly(apply);
+    }
+    function wave() {                     // 走满一圈：由月亮向外扩散的闪烁波，月晕也跟着亮一下
+      allStars.forEach(function (s) {
+        s.el.classList.remove('wave');
+        void s.el.getBoundingClientRect();
+        s.el.classList.add('wave');
+      });
+      glow.classList.remove('surge');
+      void glow.getBoundingClientRect();
+      glow.classList.add('surge');
     }
 
     function fullFrame() { return { x: 0, y: 0, w: VW, h: VH }; }
@@ -297,8 +340,10 @@ window.Scene = (function () {
       ring: { cx: cx, cy: cy, r: ringR },
       kid: { x: px, baseY: pb },
       starCount: stars.length,
+      batchSizes: batches.map(function (b) { return b.length; }),
       setPhase: setPhase, setTraveler: setTraveler, setTrail: setTrail, pulseMarker: pulseMarker,
-      setStarsLit: setStarsLit, twinkleStars: twinkleStars, setKidLook: setKidLook,
+      lightBatch: lightBatch, setLitBatches: setLitBatches, dimStars: dimStars,
+      setSparklesLit: setSparklesLit, wave: wave, setKidLook: setKidLook,
       fullFrame: fullFrame, kidFrame: kidFrame, setFrame: setFrame, toSvgPoint: toSvgPoint
     };
   }
