@@ -35,6 +35,7 @@
       hillNear: '#1a2140',    // 近山
       silhouette: '#12172e',  // 剪影色（小屋、树、小人）
       window: '#ffc978',      // 暖窗色
+      sun: '#f7c74f',         // 太阳色（第2章：可拖动的太阳及其光晕、章节入口的太阳图标）
       text: '#dfe4f2'         // 文字色（图标、辅助文字）
     },
     violet: {                 // 暗紫：柔和梦幻，偏睡前故事氛围
@@ -53,6 +54,7 @@
       hillNear: '#271e42',
       silhouette: '#1a1430',
       window: '#ffcf8a',
+      sun: '#f9cd66',
       text: '#ebe3f4'
     },
     ink: {                    // 墨青：冷静的蓝绿，自然博物馆气质
@@ -71,6 +73,7 @@
       hillNear: '#142a31',
       silhouette: '#0c1e24',
       window: '#ffc36e',
+      sun: '#f2bf4a',
       text: '#dbe8e5'
     }
   };

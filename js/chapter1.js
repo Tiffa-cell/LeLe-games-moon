@@ -7,14 +7,15 @@
  *       走满一圈的瞬间，闪烁波由月亮向外扩散、小人抬头 → 镜头落到小人身上，停 2 秒 → 缓缓拉回原构图，
  *       拉回时星空回暗，可以直接再拖一圈。四角星在第一次通关时出现，之后一直留着。
  * 往返：开场镜头停在小人身上，再拉远到「宇宙视角」（整个循环）；结尾回到小人视角。
+ * 章节入口：过关后镜头拉回时，画面下方出现一个太阳图标（app.js 管），点它进第2章。
  *
  * 模式：intro（开场）→ play（可玩）→ win（过关演出）→ hold（停在小人身上）→ return（拉远）→ play …
+ *       leave（换章节：镜头落到小人身上，然后 app.js 换场景）
  */
 window.Chapter1 = (function () {
   'use strict';
-  var M = window.MoonMath, P = window.PARAMS, Anim = window.Anim, Store = window.Store;
+  var M = window.MoonMath, P = window.PARAMS, Anim = window.Anim, Progress = window.Progress;
   var TAU = M.TAU, HOME = M.HOME_ANGLE;
-  var KEY = 'moon.progress';
 
   var scene = null, svg = null, bound = false;
   var mode = 'boot';
@@ -27,10 +28,11 @@ window.Chapter1 = (function () {
   var hinted = false;          // 本次会话里已经拖过了（光晕不再呼吸）
   var litBatches = {};         // 本圈已点亮的星星批次（节点序号 → true）
 
-  var progress = Store.get(KEY, {}) || {};
+  var progress = Progress.data;
   if (!progress.chapter1) progress.chapter1 = { completed: false, laps: 0 };
 
-  function save() { Store.set(KEY, progress); }
+  function save() { Progress.save(); }
+  function setMode(m) { mode = m; if (api.onMode) api.onMode(m); }
   function track(h) { running.push(h); return h; }
   function cancelAll() {
     running.forEach(function (h) { h.cancel(); });
@@ -132,7 +134,7 @@ window.Chapter1 = (function () {
 
   // ---- 过关演出
   function win() {
-    mode = 'win';
+    setMode('win');
     cancelAll();
     drag = null;
     progress.chapter1.completed = true;
@@ -157,37 +159,48 @@ window.Chapter1 = (function () {
     track(Anim.delay(C.winDelayMs, function () {
       tweenCamera(scene.kidFrame(), C.winZoomMs, Anim.ease.inOut, function () {
         net = 0; render();                 // 镜头在小人身上时，悄悄把轨迹清掉、回到起点
-        mode = 'hold';
+        setMode('hold');
         track(Anim.delay(C.holdMs, returnToPlay));
       });
     }));
   }
   function returnToPlay() {
     if (mode !== 'hold') return;
-    mode = 'return';
+    setMode('return');
     cancelAll();
     litBatches = {};
     scene.dimStars();                      // 新的一圈从暗夜开始，星星可以再次一批批点亮
     track(Anim.tween({ ms: P.kid.lookUpMs, ease: Anim.ease.inOut, onUpdate: function (t) { scene.setKidLook(1 - t); } }));
-    tweenCamera(scene.fullFrame(), P.camera.returnZoomMs, Anim.ease.inOut, function () { mode = 'play'; });
+    tweenCamera(scene.fullFrame(), P.camera.returnZoomMs, Anim.ease.inOut, function () { setMode('play'); });
   }
 
   // ---- 开场：停在小人身上 → 拉远到宇宙视角
   function runIntro() {
-    mode = 'intro';
+    setMode('intro');
     setCamera(scene.kidFrame());
     scene.setKidLook(0);
     track(Anim.delay(P.camera.introHoldMs, function () {
-      tweenCamera(scene.fullFrame(), P.camera.introZoomMs, Anim.ease.inOut, function () { mode = 'play'; });
+      tweenCamera(scene.fullFrame(), P.camera.introZoomMs, Anim.ease.inOut, function () { setMode('play'); });
     }));
   }
   function skipIntro() {
     cancelAll();
-    mode = 'return';
-    tweenCamera(scene.fullFrame(), 450, Anim.ease.out, function () { mode = 'play'; });
+    setMode('return');
+    tweenCamera(scene.fullFrame(), 450, Anim.ease.out, function () { setMode('play'); });
   }
 
-  // ---- 挂到（新的）场景上；first = 首次启动，其余为窗口尺寸变化后重建
+  // ---- 换章节：镜头先落到小人身上（星空同时回暗），到了再交给 app.js 换场景
+  function leave(done) {
+    cancelAll();
+    drag = null;
+    setMode('leave');
+    theta = HOME; net = 0; litBatches = {};       // 下次回来是新的一圈
+    scene.dimStars();
+    scene.setSparklesLit(false, true);
+    tweenCamera(scene.kidFrame(), P.camera.switchZoomMs, Anim.ease.inOut, done);
+  }
+
+  // ---- 挂到（新的）场景上；first = 首次进入本章，其余为窗口尺寸变化后重建
   function attach(newScene, first) {
     cancelAll();
     drag = null;
@@ -201,7 +214,7 @@ window.Chapter1 = (function () {
       svg.addEventListener('pointercancel', onUp);
     }
     scene.setLitBatches(litBatches, false);
-    scene.setSparklesLit(progress.chapter1.completed, false);
+    scene.setSparklesLit(progress.chapter1.completed, first);   // 首次进入：四角星（通关印记）淡入
     svg.classList.toggle('hint', !hinted);
     if (first) { render(); runIntro(); return; }
     // 重建：直接进入当前模式的终点状态
@@ -213,16 +226,32 @@ window.Chapter1 = (function () {
     } else {
       if (mode === 'win') { theta = HOME; net = 0; }
       if (mode === 'win' || mode === 'return') { litBatches = {}; scene.setLitBatches(litBatches, false); scene.dimStars(); }
-      mode = 'play';
+      setMode('play');
       render();
       scene.setKidLook(0);
       setCamera(scene.fullFrame());
     }
   }
+  function detach() {
+    cancelAll();
+    drag = null;
+    if (bound && svg) {
+      svg.removeEventListener('pointerdown', onDown);
+      svg.removeEventListener('pointermove', onMove);
+      svg.removeEventListener('pointerup', onUp);
+      svg.removeEventListener('pointercancel', onUp);
+    }
+    bound = false;
+    mode = 'boot';
+  }
 
-  return {
+  var api = {
     attach: attach,
+    detach: detach,
+    leave: leave,
+    onMode: null,          // app.js 挂上：模式变化时回调（管章节入口图标的显隐）
     // 供调试 / 测试读取
     state: function () { return { mode: mode, theta: theta, net: net, phase: M.phaseFromAngle(theta), lit: Object.keys(litBatches).length, progress: progress.chapter1 }; }
   };
+  return api;
 })();

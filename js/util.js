@@ -42,3 +42,14 @@ window.Store = {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* 忽略 */ }
   }
 };
+
+// 章节进度（localStorage 里的 moon.progress）：各章各占一个键（chapter1 / chapter2 …），current = 当前所在章节
+window.Progress = (function () {
+  'use strict';
+  var KEY = 'moon.progress';
+  var data = window.Store.get(KEY, {}) || {};
+  return {
+    data: data,
+    save: function () { window.Store.set(KEY, data); }
+  };
+})();
