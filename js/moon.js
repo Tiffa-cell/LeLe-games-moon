@@ -42,6 +42,20 @@ window.MoonMath = (function () {
   }
   function angleFromPhase(p) { return HOME_ANGLE - p * TAU; }
 
+  // 第2章：太阳在屏幕角 theta（atan2，y 轴向下）时，「亮面永远朝太阳」的月相。
+  // 把太阳的轨道读成一个侧视截面：太阳在下方（靠近地面上的小人这一侧）= 满月，
+  // 在上方（月亮背后）= 新月，左右 = 弦月；中间连续过渡（蛾眉月、凸月）。
+  // 返回：phase — 亮面在右的等效相位 ∈ [0, .5]（配合 litPath 使用）；
+  //       rotateDeg — 再绕月心转多少度让亮面朝向太阳；fraction — 亮面占比。
+  function litFromSun(theta) {
+    var k = Math.max(-1, Math.min(1, -Math.sin(theta)));   // 明暗界线半宽系数 = cos(2π·phase)
+    return {
+      phase: Math.acos(k) / TAU,
+      rotateDeg: theta * 180 / Math.PI,
+      fraction: (1 - k) / 2
+    };
+  }
+
   // 归一到 (-π, π]
   function normAngle(a) {
     a = a % TAU;
@@ -57,6 +71,7 @@ window.MoonMath = (function () {
     litFraction: litFraction,
     phaseFromAngle: phaseFromAngle,
     angleFromPhase: angleFromPhase,
+    litFromSun: litFromSun,
     normAngle: normAngle
   };
 })();

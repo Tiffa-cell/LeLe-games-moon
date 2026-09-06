@@ -1,5 +1,7 @@
 /* style.css — 只管布局与动效。颜色一律来自 theme.js 写入的 CSS 变量 --c-*（本文件不出现颜色值） */
 
+:root { --safe-top: env(safe-area-inset-top, 0px); }   /* 供 scene.js 读取：目标小月亮要避开 iPhone 的刘海 */
+
 html, body {
   margin: 0;
   height: 100%;
@@ -92,6 +94,41 @@ body {
 .moon-dark, .m-dark     { fill: var(--c-moon-dark);   transition: fill .7s; }
 .moon-crater            { fill: var(--c-moon-crater); opacity: var(--crater-alpha); transition: fill .7s; }
 .moon-rim, .m-rim       { fill: none; stroke: var(--c-moon); stroke-width: 3; transition: stroke .7s; }
+/* 第2章的主月亮：亮面是一个球体感的径向渐变（朝太阳一侧最亮，向明暗界线渐暗），形状由 <mask> 实时决定 */
+.moon-lit-stop   { stop-color: var(--c-moon);        transition: stop-color .7s; }
+.moon-shade-stop { stop-color: var(--c-moon-crater); transition: stop-color .7s; }
+.moon-sphere     { fill: url(#g-sphere); }
+.mask-shape      { fill: var(--c-moon); }   /* 遮罩按 alpha 取形状，填什么色都一样；写月亮色只是为了不写死色值 */
+
+/* ---- 太阳（第2章）：轨道虚线、太阳、光晕 */
+.sun-stop    { stop-color: var(--c-sun); transition: stop-color .7s; }
+.sun-disc    { fill: var(--c-sun); transition: fill .7s; }
+.sun-glow    { opacity: .9; }
+.hint .sun-glow { animation: breathe 2.6s ease-in-out infinite; }   /* 还没拖过时轻轻呼吸，提示可以摸 */
+.orbit-guide {
+  fill: none;
+  stroke: var(--c-ring);
+  stroke-linecap: round;
+  opacity: var(--orbit-alpha);
+  transition: stroke .7s;
+}
+
+/* ---- 目标相位小月亮（第2章，屏幕左上角） */
+.target-frame {                               /* 外面那圈虚线：平时很淡；太阳停在正确位置时，在 holdMs 里慢慢亮起来 */
+  fill: none;
+  stroke: var(--c-ring);
+  stroke-linecap: round;
+  opacity: var(--target-frame-alpha);
+  transition: opacity .35s ease-out, stroke .7s;
+}
+.target.near .target-frame { opacity: 1; transition-duration: var(--hold-ms); }
+.target-inner {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity var(--target-swap-ms) ease-in-out;
+}
+.target-inner.swap  { opacity: 0; }           /* 换目标：先淡出，换形状，再淡入 */
+.target-inner.pulse { animation: pulse .55s ease-out; }
 
 /* ---- 相位环 */
 .ring-guide {
@@ -157,3 +194,30 @@ body {
   transition: opacity .3s, transform .3s;
 }
 .theme-dot.active { opacity: 1; transform: scale(1.12); }
+
+/* ---- 章节入口：画面下方一个安静的小图标（第1章过关后出现太阳 → 进第2章；第2章里是小月亮 → 回第1章） */
+#chapter-nav {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  transform: translateX(-50%);
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  z-index: 2;
+  touch-action: manipulation;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: opacity 1.6s ease-out;
+}
+#chapter-nav.show { opacity: .6; pointer-events: auto; }
+#chapter-nav svg { display: block; width: 32px; height: 32px; margin: auto; overflow: visible; }
+.nav-sun         { fill: var(--c-sun); }
+.nav-sun-ray     { stroke: var(--c-sun); stroke-width: 2.6; stroke-linecap: round; }
+.nav-moon-lit    { fill: var(--c-moon); }
+.nav-moon-outline{ fill: none; stroke: var(--c-moon); stroke-width: 1.2; opacity: .35; }
