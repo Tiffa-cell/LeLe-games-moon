@@ -56,6 +56,28 @@ window.MoonMath = (function () {
     };
   }
 
+  // 第2章（椭圆轨道版）：太阳在轨道角 phi 时的月相。轨道是从稍高处俯视的一个水平圆环，
+  // 画成横向长、纵向扁的椭圆（半径 rx、ry）：phi = -π/2 是椭圆最上端 = 太阳在月亮正后方（新月），
+  // phi = +π/2 是最下端 = 太阳在正前方（满月），左右两端 = 弦月；中间连续过渡。
+  //   depth       — 前后深度 ∈ [-1, 1]：-1 正后方，+1 正前方（决定亮面占比与太阳大小）
+  //   screenAngle — 太阳在屏幕上相对月心的方向（椭圆压扁后与 phi 不同）：亮面朝这个方向
+  //   phase       — 亮面在右的等效相位 ∈ [0, .5]（配合 litPath）；rotateDeg — 再转到 screenAngle
+  //   fraction    — 亮面占比；cycle — 第1章意义上的相位 ∈ [0, 1)（0 新月 → .25 上弦 → .5 满月 → .75 下弦）
+  function litFromOrbit(phi, rx, ry) {
+    var depth = Math.max(-1, Math.min(1, Math.sin(phi)));
+    var k = -depth;                                          // 明暗界线半宽系数 = cos(2π·phase)
+    var screen = Math.atan2(ry * Math.sin(phi), rx * Math.cos(phi));
+    var cycle = (phi + Math.PI / 2) / TAU;
+    return {
+      depth: depth,
+      screenAngle: screen,
+      phase: Math.acos(k) / TAU,
+      rotateDeg: screen * 180 / Math.PI,
+      fraction: (1 - k) / 2,
+      cycle: cycle - Math.floor(cycle)
+    };
+  }
+
   // 归一到 (-π, π]
   function normAngle(a) {
     a = a % TAU;
@@ -72,6 +94,7 @@ window.MoonMath = (function () {
     phaseFromAngle: phaseFromAngle,
     angleFromPhase: angleFromPhase,
     litFromSun: litFromSun,
+    litFromOrbit: litFromOrbit,
     normAngle: normAngle
   };
 })();

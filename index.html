@@ -18,8 +18,14 @@
 <body>
   <svg id="stage" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice"
        role="img" aria-label="月相 · 第1章 圆缺循环：拖着小月亮绕一圈"></svg>
+  <!-- 第2章的提词层（HTML）：上方三个进度点、下方一句给念的人的提词（一次只显示一句）、底边 8 相位小月相带 -->
+  <div id="hud" hidden>
+    <div id="progress" aria-label="进度"></div>
+    <div id="prompt" aria-live="polite"></div>
+    <svg id="phase-strip" xmlns="http://www.w3.org/2000/svg" aria-label="八个相位" role="img"></svg>
+  </div>
   <nav id="themes" aria-label="夜色"></nav>
-  <!-- 章节入口：第1章过关后出现的太阳 / 第2章里的小月亮（图标由 app.js 画，无文字） -->
+  <!-- 章节入口：第1章过关后出现的太阳 + → / 第2章过关后的 ← + 小月亮（图标由 app.js 画） -->
   <button id="chapter-nav" type="button" aria-label="进入第2章"></button>
 
   <script src="js/params.js"></script>

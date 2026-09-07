@@ -36,6 +36,9 @@
       silhouette: '#12172e',  // 剪影色（小屋、树、小人）
       window: '#ffc978',      // 暖窗色
       sun: '#f7c74f',         // 太阳色（第2章：可拖动的太阳及其光晕、章节入口的太阳图标）
+      orbit: '#95a3d6',       // 轨道色（第2章：太阳的椭圆轨道）
+      prompt: '#eef1fb',      // 提词字色（第2章：屏幕下方给念的人的一句话）
+      progress: '#f7e7b8',    // 进度点色（第2章：屏幕上方三个小圆点、月亮外围的细弧线）
       text: '#dfe4f2'         // 文字色（图标、辅助文字）
     },
     violet: {                 // 暗紫：柔和梦幻，偏睡前故事氛围
@@ -55,6 +58,9 @@
       silhouette: '#1a1430',
       window: '#ffcf8a',
       sun: '#f9cd66',
+      orbit: '#ab9ed0',
+      prompt: '#f5eefb',
+      progress: '#f9e6c2',
       text: '#ebe3f4'
     },
     ink: {                    // 墨青：冷静的蓝绿，自然博物馆气质
@@ -74,6 +80,9 @@
       silhouette: '#0c1e24',
       window: '#ffc36e',
       sun: '#f2bf4a',
+      orbit: '#8cb0b0',
+      prompt: '#ebf5f2',
+      progress: '#f3e3b4',
       text: '#dbe8e5'
     }
   };
