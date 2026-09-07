@@ -1,14 +1,17 @@
-/* scene.js — 分层绘制（SVG）：天空 → 星 → 月晕 → 相位环 / 太阳轨道 → 主月亮 → 目标小月亮 → 地面剪影
+/* scene.js — 分层绘制（SVG）
+ *   第1章：天空 → 星 → 月晕 → 相位环 → 主月亮 → 地面剪影（小屋、树、小人）
+ *   第2章：天空 → 星 → 月晕 → 轨道后半段 + 后方的太阳 → 主月亮 → 细弧线 → 轨道前半段 + 前方的太阳
  *
  * 坐标系沿用 M0 概念稿（参考画布 1668 × 2388），按实际屏幕比例扩展画布：
  *   比参考更窄长（iPad 竖屏、iPhone）：宽固定 1668，高按比例加长；
  *   比参考更宽（iPad 横屏）：高固定 2388，宽按比例加宽，两侧补山丘。
  * 主月亮按比例居上，地面锚定在画布底部，所以任何屏幕都不裁切构图。
  *
- * 两章共用同一套天空、星、月晕、主月亮、地面与镜头；区别在第 4 层与主月亮的亮面：
- *   第1章：相位环（八枚小月亮 + 可拖动的那颗），主月亮亮面按相位剪裁（clipPath）；
- *   第2章：太阳轨道 + 可拖动的太阳，主月亮亮面用 <mask> 实时算出、亮面永远朝太阳，
- *          外加左上角一枚「目标相位」小月亮。
+ * 两章共用天空、星、月晕、主月亮；区别：
+ *   第1章：相位环（八枚小月亮 + 可拖动的那颗），主月亮亮面按相位剪裁（clipPath）；有地面和小人，有镜头往返。
+ *   第2章：玩家自己的眼睛——没有地面、房子、小人，镜头不动。带俯角的椭圆轨道，太阳沿椭圆拖动：
+ *          在上半段（月亮后方）变小、被月亮挡住；在下半段（月亮前方）变大、盖在月亮前面。
+ *          主月亮亮面用 <mask> 实时算出、亮面永远朝太阳。月亮外围一圈细弧线用来显示「停住 1 秒」的进度。
  *
  * 本文件不出现任何颜色值：所有填色都通过 class → CSS 变量（theme.js）引用。
  */
@@ -49,13 +52,7 @@ window.Scene = (function () {
            ' Q ' + x + ',' + y + ' ' + x + ',' + (y - s) + ' Z';
   }
 
-  // 顶部安全区（iPhone 刘海）的高度，CSS px；读的是 style.css 里 --safe-top: env(safe-area-inset-top)
-  function safeTopPx() {
-    var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--safe-top'));
-    return isFinite(v) ? v : 0;
-  }
-
-  // opts.chapter：1（默认）相位环；2 太阳轨道
+  // opts.chapter：1（默认）相位环 + 地面；2 椭圆轨道上的太阳（玩家自己的眼睛）
   function create(svg, viewW, viewH, opts) {
     var P = window.PARAMS;
     var chapter = (opts && opts.chapter) || 1;
@@ -69,11 +66,15 @@ window.Scene = (function () {
     // ---- 布局（画布单位）
     var cx = VW / 2;
     var moonR = P.moon.radius;
-    var orbitR = chapter === 1 ? P.ring.radius : P.sun.orbitRadius;        // 相位环 / 太阳轨道的半径
-    var orbitOuter = chapter === 1 ? orbitR + P.ring.travelerRadius + P.ring.haloExtra
-                                   : orbitR + P.sun.radius + P.sun.glowExtra;
+    var orbitR = P.ring.radius;                     // 第1章：相位环半径
+    var orbitOuter = orbitR + P.ring.travelerRadius + P.ring.haloExtra;
     var groundTop = VH - 408;                       // 远山最高点（M0：2388 - 1980）
     var cy = clamp(VH * P.moon.yRatio, orbitOuter + 40, groundTop - orbitOuter - 40);
+    var ORX = P.orbit.rx, ORY = P.orbit.ry;         // 第2章：椭圆轨道
+    if (chapter === 2) {
+      var sunOuter = (P.sun.radius + P.sun.glowExtra) * P.sun.frontScale;
+      cy = clamp(VH * P.orbit.moonYRatio, ORY + sunOuter + 120, VH - ORY - sunOuter - 520);
+    }
     var by = VH - 336;                              // 小屋地基
     var pb = VH - 294;                              // 小人脚下
     var hx = cx - 334, tx = hx - 128, px = cx + 416;
@@ -93,10 +94,9 @@ window.Scene = (function () {
     rs.setProperty('--crater-alpha', P.moon.craterAlpha);
     rs.setProperty('--ring-alpha', P.ring.alpha);
     rs.setProperty('--trail-alpha', P.ring.trailAlpha);
-    rs.setProperty('--orbit-alpha', P.sun.orbitAlpha);
-    rs.setProperty('--target-frame-alpha', P.target.frameAlpha);
-    rs.setProperty('--target-swap-ms', P.target.swapMs + 'ms');
-    rs.setProperty('--hold-ms', P.target.holdMs + 'ms');
+    rs.setProperty('--orbit-alpha', P.orbit.alpha);
+    rs.setProperty('--orbit-back-alpha', P.orbit.backAlpha);
+    rs.setProperty('--prompt-fade-ms', P.guide.promptFadeMs + 'ms');
 
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     svg.setAttribute('viewBox', '0 0 ' + VW + ' ' + VH);
@@ -131,9 +131,13 @@ window.Scene = (function () {
     var area = (VW * VH) / (ref.width * ref.height);
     var stars = [], sparkles = [], guard = 0, x, y, op;
     var nStars = clamp(Math.round(P.stars.count * area), 24, 160);
+    function nearOrbit(x, y, margin) {             // 星星避开相位环（第1章）/ 椭圆轨道与太阳（第2章）
+      if (chapter === 1) return Math.hypot(x - cx, y - cy) < orbitR + margin;
+      return Math.hypot((x - cx) / (ORX + margin), (y - cy) / (ORY + margin)) < 1;
+    }
     while (stars.length < nStars && guard++ < 8000) {
       x = 40 + R() * (VW - 80); y = 50 + R() * (VH - 540);
-      if (Math.hypot(x - cx, y - cy) < orbitR + 120) continue;
+      if (nearOrbit(x, y, 120)) continue;
       var r = 2.2 + R() * 2.4; op = 0.28 + R() * 0.57;
       var s = el('circle', { cx: f(x), cy: f(y), r: f(r), 'class': 'star' }, lStars);
       s.style.setProperty('--op', op.toFixed(2));
@@ -142,7 +146,7 @@ window.Scene = (function () {
     var nSpark = clamp(Math.round(P.stars.sparkles * area), 3, 20); guard = 0;
     while (sparkles.length < nSpark && guard++ < 8000) {
       x = 80 + R() * (VW - 160); y = 80 + R() * (VH - 670);
-      if (Math.hypot(x - cx, y - cy) < orbitR + 160) continue;
+      if (nearOrbit(x, y, 160)) continue;
       var sz = 9 + R() * 6; op = 0.5 + R() * 0.4;
       var sp = el('path', { d: sparklePath(x, y, sz), 'class': 'sparkle' }, lStars);
       sp.style.setProperty('--op', op.toFixed(2));
@@ -212,12 +216,17 @@ window.Scene = (function () {
       trav.set(0);
     }
 
-    // ---- 4 第2章：太阳轨道——虚线轨道、太阳与光晕
-    var gSun;
+    // ---- 4 第2章：椭圆轨道的后半段（月亮后面）与太阳。太阳在后方时挂在这一层，被主月亮挡住；
+    //      到前方时挪到第 5b 层（主月亮之上）。轨道线本身不穿过月亮（ry > 月亮半径），只有太阳会前后穿越。
+    var gSun, lSunBack, lSunFront, dwellArc, arcLen = 0;
+    function orbitHalf(upper) {                      // 椭圆的上半段（后）/ 下半段（前），从左端到右端
+      var L = f(cx - ORX) + ',' + f(cy), Rt = f(cx + ORX) + ',' + f(cy);
+      return 'M ' + L + ' A ' + ORX + ',' + ORY + ' 0 0 ' + (upper ? 1 : 0) + ' ' + Rt;
+    }
     if (chapter === 2) {
-      var lSun = el('g', { 'class': 'layer layer-sun' }, svg);
-      el('circle', { cx: cx, cy: cy, r: orbitR, 'class': 'orbit-guide', 'stroke-width': P.sun.orbitWidth, 'stroke-dasharray': P.sun.orbitDash }, lSun);
-      gSun = el('g', { 'class': 'sun' }, lSun);
+      lSunBack = el('g', { 'class': 'layer layer-sun-back' }, svg);
+      el('path', { d: orbitHalf(true), 'class': 'orbit-guide orbit-back', 'stroke-width': P.orbit.width, 'stroke-dasharray': P.orbit.dash }, lSunBack);
+      gSun = el('g', { 'class': 'sun' }, lSunBack);
       el('circle', { r: P.sun.radius + P.sun.glowExtra, fill: 'url(#g-sun-glow)', 'class': 'sun-glow' }, gSun);
       el('circle', { r: P.sun.radius, 'class': 'sun-disc' }, gSun);
     }
@@ -246,21 +255,26 @@ window.Scene = (function () {
       el('circle', { cx: cx + c[0], cy: cy + c[1], r: c[2], 'class': 'moon-crater' }, gLit);
     });
 
-    // ---- 5b 第2章：左上角的「目标相位」小月亮（外面一圈很淡的虚线当画框）
-    var gTarget, gTargetInner, targetMoon, tgx = 0, tgy = 0;
+    // ---- 5a 第2章：月亮外围的细弧线——太阳停在目标区域时，1 秒里从顶端顺时针填满
     if (chapter === 2) {
-      var unitsPerPx = VW / (viewW > 0 ? viewW : VW);
-      tgx = P.target.x;
-      tgy = Math.max(P.target.y, safeTopPx() * unitsPerPx + P.target.safeGap);
-      var lTarget = el('g', { 'class': 'layer layer-target' }, svg);
-      gTarget = el('g', { 'class': 'target', transform: 'translate(' + f(tgx) + ' ' + f(tgy) + ')' }, lTarget);
-      el('circle', { r: P.target.radius + P.target.frameExtra, 'class': 'target-frame', 'stroke-width': P.sun.orbitWidth, 'stroke-dasharray': P.sun.orbitDash }, gTarget);
-      gTargetInner = el('g', { 'class': 'target-inner' }, gTarget);
-      targetMoon = smallMoon(gTargetInner, P.target.radius);
+      var lArc = el('g', { 'class': 'layer layer-arc' }, svg);
+      var arcR = moonR + P.guide.arcGap;
+      arcLen = M.TAU * arcR;
+      dwellArc = el('circle', { cx: cx, cy: cy, r: arcR, 'class': 'dwell-arc', 'stroke-width': P.guide.arcWidth,
+                                'stroke-dasharray': f(arcLen), 'stroke-dashoffset': f(arcLen),
+                                transform: 'rotate(-90 ' + f(cx) + ' ' + f(cy) + ')' }, lArc);
     }
 
-    // ---- 6 地面：圆弧山丘、小屋（暖窗）、小树、仰望的小人
-    var lGround = el('g', { 'class': 'layer layer-ground' }, svg);
+    // ---- 5b 第2章：椭圆轨道的前半段（月亮前面）；太阳在前方时挂在这里，盖在月亮前面
+    if (chapter === 2) {
+      lSunFront = el('g', { 'class': 'layer layer-sun-front' }, svg);
+      el('path', { d: orbitHalf(false), 'class': 'orbit-guide orbit-front', 'stroke-width': P.orbit.width, 'stroke-dasharray': P.orbit.dash }, lSunFront);
+    }
+
+    // ---- 6 第1章：地面——圆弧山丘、小屋（暖窗）、小树、仰望的小人（第2章是玩家自己的眼睛，没有地面）
+    var lGround = null, gKid = null, kidBody = null, kidHead = null;
+    if (chapter === 1) {
+    lGround = el('g', { 'class': 'layer layer-ground' }, svg);
     el('rect', { x: -VW, y: VH - 80, width: VW * 3, height: VH, 'class': 'hill-near' }, lGround);   // 地平面兜底
     if (VW > ref.width + 200) {                       // 横屏：向两侧续几座山
       var k = 0, hxL = cx - 1250, hxR = cx + 1300;
@@ -282,9 +296,10 @@ window.Scene = (function () {
     el('path', { d: 'M ' + tx + ',' + (by - 128) + ' Q ' + (tx + 30) + ',' + (by - 82) + ' ' + tx + ',' + (by - 44) +
                     ' Q ' + (tx - 30) + ',' + (by - 82) + ' ' + tx + ',' + (by - 128) + ' Z', 'class': 'sil' }, lGround);
     // 小人：右侧山丘顶，玩家的化身
-    var gKid = el('g', { 'class': 'kid' }, lGround);
-    var kidBody = el('path', { 'class': 'sil' }, gKid);
-    var kidHead = el('circle', { r: 13, 'class': 'sil' }, gKid);
+    gKid = el('g', { 'class': 'kid' }, lGround);
+    kidBody = el('path', { 'class': 'sil' }, gKid);
+    kidHead = el('circle', { r: 13, 'class': 'sil' }, gKid);
+    }
 
     // 动画结束后清掉一次性 class（只绑一次）
     if (!svg.__sceneBound) {
@@ -297,6 +312,7 @@ window.Scene = (function () {
 
     // ---- API
     function setKidLook(u) {              // u: 0 平视 → 1 抬头望月（头往月亮那边抬，整个人微微后仰）
+      if (!gKid) return;
       var top = 50 + 4 * u;
       kidBody.setAttribute('d', 'M ' + (px - 15) + ',' + pb + ' Q ' + (px - 15) + ',' + f(pb - 46 - 3 * u) + ' ' + px + ',' + f(pb - top) +
                                 ' Q ' + (px + 15) + ',' + f(pb - 46 - 3 * u) + ' ' + (px + 15) + ',' + pb + ' Z');
@@ -343,17 +359,33 @@ window.Scene = (function () {
     function pulseMarker(i) { pop(markerInners[i]); }
 
     // 第2章
-    function setSun(theta) {              // 太阳到屏幕角 theta：太阳移位，主月亮亮面转向太阳，球体渐变的中心也朝太阳偏
-      var L = M.litFromSun(theta);
-      setLitShape(M.litPath(cx, cy, moonR, L.phase), L.rotateDeg, L.fraction);
-      gSphere.setAttribute('cx', f(cx + moonR * P.sun.shadeOffset * Math.cos(theta)));
-      gSphere.setAttribute('cy', f(cy + moonR * P.sun.shadeOffset * Math.sin(theta)));
-      gSun.setAttribute('transform', 'translate(' + f(cx + orbitR * Math.cos(theta)) + ' ' + f(cy + orbitR * Math.sin(theta)) + ')');
+    function orbitPoint(phi) {            // 轨道角 phi → 椭圆上的画布坐标
+      return { x: cx + ORX * Math.cos(phi), y: cy + ORY * Math.sin(phi) };
     }
-    function setTarget(theta) { targetMoon.setSun(theta); }             // 目标小月亮：太阳在 theta 时的样子
-    function setTargetNear(near) { gTarget.classList.toggle('near', !!near); }
-    function setTargetHidden(hidden) { gTargetInner.classList.toggle('swap', !!hidden); }
-    function pulseTarget() { pop(gTargetInner); }
+    function sunScale(depth) {            // 前后深度 → 太阳缩放：正后方 backScale，正前方 frontScale，中间连续
+      return P.sun.backScale + (P.sun.frontScale - P.sun.backScale) * (depth + 1) / 2;
+    }
+    var sunInFront = null;
+    function setSun(phi) {                // 太阳到轨道角 phi：移位 + 按深度缩放 + 前后换层；主月亮亮面朝太阳，球体渐变的中心也朝太阳偏
+      var L = M.litFromOrbit(phi, ORX, ORY);
+      var pt = orbitPoint(phi), sc = sunScale(L.depth);
+      setLitShape(M.litPath(cx, cy, moonR, L.phase), L.rotateDeg, L.fraction);
+      gSphere.setAttribute('cx', f(cx + moonR * P.sun.shadeOffset * Math.cos(L.screenAngle)));
+      gSphere.setAttribute('cy', f(cy + moonR * P.sun.shadeOffset * Math.sin(L.screenAngle)));
+      gSun.setAttribute('transform', 'translate(' + f(pt.x) + ' ' + f(pt.y) + ') scale(' + sc.toFixed(3) + ')');
+      var front = L.depth >= 0;
+      if (front !== sunInFront) {         // 穿过左右两端：前 ↔ 后换层（后方被月亮挡住，前方盖在月亮前面）
+        sunInFront = front;
+        (front ? lSunFront : lSunBack).appendChild(gSun);
+        gSun.setAttribute('data-depth', front ? 'front' : 'back');
+      }
+      return { x: pt.x, y: pt.y, scale: sc, lit: L };
+    }
+    function setArc(t) {                  // 细弧线填满的比例 0 → 1（0 时隐藏）
+      t = clamp(t, 0, 1);
+      dwellArc.setAttribute('stroke-dashoffset', f(arcLen * (1 - t)));
+      dwellArc.style.opacity = t > 0 ? 1 : 0;
+    }
 
     function pop(g) {                     // 轻轻一跳
       if (!g) return;
@@ -407,7 +439,8 @@ window.Scene = (function () {
     }
 
     function fullFrame() { return { x: 0, y: 0, w: VW, h: VH }; }
-    function kidFrame() {                 // 小人视角：他在画面下方，头顶是一片天
+    function kidFrame() {                 // 小人视角：他在画面下方，头顶是一片天（第2章没有小人：退回整幅画面）
+      if (!gKid) return fullFrame();
       var w = VW * P.camera.kidFrameRatio, h = w / aspect;
       var x = px - w / 2, y = Math.min(pb - h * 0.72, VH - h + 20);
       return { x: x, y: y, w: w, h: h };
@@ -423,12 +456,12 @@ window.Scene = (function () {
     }
 
     if (chapter === 1) { setPhase(0); setTraveler(M.HOME_ANGLE); }
-    else { setSun(P.sun.startAngle); setTarget(P.sun.startAngle); }
+    else { setSun(P.sun.startAngle); setArc(0); }
 
     var api = {
       svg: svg, VW: VW, VH: VH, aspect: aspect, chapter: chapter,
       moon: { cx: cx, cy: cy, r: moonR },
-      kid: { x: px, baseY: pb },
+      kid: chapter === 1 ? { x: px, baseY: pb } : null,
       starCount: stars.length,
       batchSizes: batches.map(function (b) { return b.length; }),
       lightBatch: lightBatch, setLitBatches: setLitBatches, dimStars: dimStars,
@@ -439,10 +472,9 @@ window.Scene = (function () {
       api.ring = { cx: cx, cy: cy, r: orbitR };
       api.setPhase = setPhase; api.setTraveler = setTraveler; api.setTrail = setTrail; api.pulseMarker = pulseMarker;
     } else {
-      api.sun = { cx: cx, cy: cy, r: orbitR };
-      api.target = { x: tgx, y: tgy, r: P.target.radius };
-      api.setSun = setSun; api.setTarget = setTarget; api.setTargetNear = setTargetNear;
-      api.setTargetHidden = setTargetHidden; api.pulseTarget = pulseTarget;
+      api.orbit = { cx: cx, cy: cy, rx: ORX, ry: ORY };
+      api.orbitPoint = orbitPoint; api.sunScale = sunScale;
+      api.setSun = setSun; api.setArc = setArc;
     }
     return api;
   }

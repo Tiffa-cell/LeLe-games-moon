@@ -1,33 +1,41 @@
 /* chapter2.js — 第2章 月亮不发光
  *
  * 目标：月亮亮的那一面永远朝着太阳。
- * 画面：中央月球（球体感），一颗可拖动的太阳在外圈轨道上；屏幕左上角一枚「目标相位」小月亮。
- * 交互：拖太阳绕月亮走（可以走一整圈），中央月亮的明暗界线实时跟随太阳方向——亮面永远朝太阳
- *       （几何在 moon.js 的 litFromSun；形状由 scene.js 的 <mask> 实时算出，不用预制相位图）。
- * 过关：把太阳拖到让中央月亮和目标一样形状的位置，停住 holdMs（1 秒）算对；目标外圈的虚线在这一秒里慢慢亮起来。
- *       连对 goal（3）次过关。允许 ±toleranceDeg（20°）的误差；松手时在误差内会轻轻吸到正确位置。
- * 反馈：每答对一次，目标轻轻一跳、月晕亮一下，天空点亮太阳那一侧的几批星；
- *       第三次对了：闪烁波由月亮向外扩散、小人抬头 → 镜头落到小人身上，停 2 秒 → 缓缓拉回，星空回暗，新的一轮开始。
- * 往返：开场镜头停在小人身上再拉远；结尾回到小人视角。左下方的小月亮图标（app.js 管）可以回第1章。
+ * 视角：玩家自己的眼睛——画面只有夜空、中央大月亮、太阳和它的椭圆轨道；没有地面、房子、小人，镜头不动。
+ * 交互：拖着太阳沿椭圆轨道走（在轨道任何位置按住拖也行，可以绕一整圈）。
+ *       轨道是从稍高处俯视的一个水平圆环：太阳走到上半段 = 在月亮后方（变小、被月亮挡住），
+ *       走到下半段 = 在月亮前方（变大、盖在月亮前面）。中央月亮的亮面实时朝着太阳
+ *       （几何在 moon.js 的 litFromOrbit；形状由 scene.js 的 <mask> 实时算出，不用预制相位图）。
+ * 引导：三步，每步屏幕下方一句中文提词（给念的人的，孩子不用识字），一次只显示一句：
+ *       ① 你能找到满月吗？——太阳到正前方（±20°）
+ *       ② 满月是从哪一边开始变缺的？——从满月往任意一边拖，直到月亮缺掉 ≥ 25%
+ *       ③ 能把月亮藏起来吗？——太阳到正后方（±20°，新月）
+ *       太阳进入目标区域就开始计时，月亮外围的细弧线在 1 秒里填满即算完成；中途拖出去弧线清空。
+ *       屏幕上方三个小圆点显示进度，完成一步亮一个；屏幕下方边缘一条 8 相位小月相带，当前相位高亮。
+ * 过关：三个点全亮 → 星星波（沿用第1章）→ 出现「←」返回键（app.js 管）。之后太阳仍可自由拖着玩。
  *
- * 模式：intro → play → win → hold → return → play …；leave（换章节）
+ * 模式：play（可玩、引导中）→ win（闪烁波）→ done（过关后自由玩）；leave（换章节）
  */
 window.Chapter2 = (function () {
   'use strict';
   var M = window.MoonMath, P = window.PARAMS, Anim = window.Anim, Progress = window.Progress;
-  var TAU = M.TAU;
+  var FRONT = Math.PI / 2, BACK = -Math.PI / 2;      // 轨道角：正前方（满月）/ 正后方（新月）
+
+  // 三步引导：text 是提词；test(lit) 判断太阳此刻是否在目标区域（lit 见 MoonMath.litFromOrbit）
+  var STEPS = [
+    { text: '你能找到满月吗？',        test: function (phi) { return within(phi, FRONT); } },
+    { text: '满月是从哪一边开始变缺的？', test: function (phi) { return 1 - lit(phi).fraction >= P.guide.gapMin - 1e-6; } },
+    { text: '能把月亮藏起来吗？',       test: function (phi) { return within(phi, BACK); } }
+  ];
 
   var scene = null, svg = null, bound = false;
   var mode = 'boot';
-  var theta = P.sun.startAngle;   // 太阳的屏幕角
-  var target = null;              // 目标：太阳应到的屏幕角（弧度）；null = 此刻没有目标（切换中 / 演出中）
-  var targetIndex = -1;           // 目标在 choices 等分里的序号
-  var streak = 0;                 // 本轮已连对次数
-  var dwell = null;               // 「停住 1 秒」计时
+  var phi = P.sun.startAngle;     // 太阳的轨道角
+  var step = 0;                   // 当前在第几步（0..2）；≥ 3 = 全部完成
+  var stepArmed = false;          // 当前这一步是否已就绪（换提词的间隙里不计时）
+  var dwell = null;               // 「停住 1 秒」的补间（同时驱动细弧线）
   var drag = null;                // { id, offset }
   var running = [];
-  var snapHandle = null;
-  var camera = null;
   var hinted = false;
   var litBatches = {};            // 本轮已点亮的星星批次
 
@@ -40,103 +48,134 @@ window.Chapter2 = (function () {
   function cancelAll() {
     running.forEach(function (h) { h.cancel(); });
     running = [];
-    snapHandle = null;
     dwell = null;
   }
-  function step() { return TAU / P.target.choices; }
-  function choiceAngle(i) { return M.normAngle(i * step()); }                     // 0 = 正右方（弦月），顺时针编号
-  function nearestChoice(a) { return ((Math.round(a / step()) % P.target.choices) + P.target.choices) % P.target.choices; }
-  function within(a, b) { return Math.abs(M.normAngle(a - b)) <= P.target.toleranceDeg * Math.PI / 180; }
+  function lit(a) { return M.litFromOrbit(a, P.orbit.rx, P.orbit.ry); }
+  function within(a, b) { return Math.abs(M.normAngle(a - b)) <= P.guide.toleranceDeg * Math.PI / 180; }
+
+  // ---- HUD（HTML）：上方三个进度点、下方一句提词、底边 8 相位小月相带
+  var hud = {
+    root: null, dots: [], prompt: null, strip: [], built: false, text: '', fade: null,
+    build: function () {
+      if (hud.built) return;
+      hud.built = true;
+      hud.root = document.getElementById('hud');
+      hud.prompt = document.getElementById('prompt');
+      var dots = document.getElementById('progress');
+      for (var i = 0; i < STEPS.length; i++) {
+        var d = document.createElement('i');
+        d.className = 'dot';
+        dots.appendChild(d);
+        hud.dots.push(d);
+      }
+      var NS = 'http://www.w3.org/2000/svg';
+      var S = P.guide.strip, cell = S.cell, r = S.radius;
+      var stripSvg = document.getElementById('phase-strip');
+      stripSvg.setAttribute('viewBox', '0 0 ' + (cell * 8) + ' ' + cell);
+      for (var k = 0; k < 8; k++) {                 // 第1章意义上的八个相位：新月 → 上弦 → 满月 → 下弦 → …
+        var slot = document.createElementNS(NS, 'g');   // 外层管位置（transform 属性），内层管高亮缩放（CSS transform）
+        slot.setAttribute('transform', 'translate(' + (cell * k + cell / 2) + ' ' + (cell / 2) + ')');
+        var g = document.createElementNS(NS, 'g');
+        g.setAttribute('class', 'strip-moon');
+        slot.appendChild(g);
+        var dark = document.createElementNS(NS, 'circle');
+        dark.setAttribute('r', r); dark.setAttribute('class', 'm-dark');
+        g.appendChild(dark);
+        var d = M.litPath(0, 0, r, k / 8);
+        if (d) {
+          var litEl = document.createElementNS(NS, 'path');
+          litEl.setAttribute('d', d); litEl.setAttribute('class', 'm-lit');
+          g.appendChild(litEl);
+        } else {
+          var rim = document.createElementNS(NS, 'circle');
+          rim.setAttribute('r', r - 1); rim.setAttribute('class', 'm-rim strip-rim');
+          g.appendChild(rim);
+        }
+        stripSvg.appendChild(slot);
+        hud.strip.push(g);
+      }
+    },
+    show: function (on) { hud.root.hidden = !on; hud.root.classList.toggle('show', !!on); },
+    setDots: function (n) { hud.dots.forEach(function (d, i) { d.classList.toggle('lit', i < n); }); },
+    setStrip: function (cycle) {                    // 当前相位高亮
+      var idx = Math.round(cycle * 8) % 8;
+      hud.strip.forEach(function (g, i) { g.classList.toggle('current', i === idx); });
+    },
+    setPrompt: function (text, instant) {           // 换提词：先淡出，换字，再淡入；一次只显示一句
+      if (hud.fade) { hud.fade.cancel(); hud.fade = null; }
+      if (text === hud.text && !instant) return;
+      hud.text = text;
+      if (instant) { hud.prompt.textContent = text; hud.prompt.classList.toggle('out', !text); return; }
+      hud.prompt.classList.add('out');
+      hud.fade = Anim.delay(P.guide.promptFadeMs, function () {
+        hud.fade = null;
+        hud.prompt.textContent = text;
+        if (text) hud.prompt.classList.remove('out');
+      });
+    }
+  };
 
   // ---- 渲染
-  function render() { scene.setSun(theta); }
-  function setCamera(fr) { camera = fr; scene.setFrame(fr); }
-  function lerpFrame(a, b, t) {
-    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, w: a.w + (b.w - a.w) * t, h: a.h + (b.h - a.h) * t };
-  }
-  function tweenCamera(to, ms, ease, done) {
-    var from = camera;
-    return track(Anim.tween({
-      ms: ms, ease: ease,
-      onUpdate: function (t) { setCamera(lerpFrame(from, to, t)); },
-      onDone: done
-    }));
+  function render() {
+    scene.setSun(phi);
+    hud.setStrip(lit(phi).cycle);
   }
 
-  // ---- 目标
-  function pickTarget() {                 // 随机选一个：不选太阳此刻所在的方位（不然不用动），也不和上一个重复
-    var n = P.target.choices, avoid = nearestChoice(theta), pool = [];
-    for (var i = 0; i < n; i++) if (i !== avoid && i !== targetIndex) pool.push(i);
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
-  function showTarget(i) {
-    targetIndex = i;
-    target = choiceAngle(i);
-    scene.setTarget(target);
-    checkDwell();
-  }
-  function nextTarget() {                 // 换目标：先淡出，换形状，再淡入
-    target = null;
-    stopDwell();
-    scene.setTargetHidden(true);
-    track(Anim.delay(P.target.swapMs, function () {
-      showTarget(pickTarget());
-      scene.setTargetHidden(false);
-    }));
-  }
-
-  // ---- 「停住 1 秒」：太阳在误差范围内就开始计时，离开就作废；到点算对
+  // ---- 引导：当前步的目标区域 / 停住 1 秒（细弧线）
+  function inTarget() { return mode === 'play' && stepArmed && step < STEPS.length && STEPS[step].test(phi); }
   function checkDwell() {
-    if (mode !== 'play' || target === null) { stopDwell(); return; }
-    var near = within(theta, target);
+    var near = inTarget();
     if (near && !dwell) {
-      scene.setTargetNear(true);
-      dwell = track(Anim.delay(P.target.holdMs, success));
+      dwell = track(Anim.tween({
+        ms: P.guide.holdMs, ease: Anim.ease.linear,
+        onUpdate: function (t) { scene.setArc(t); },
+        onDone: function () { dwell = null; complete(); }
+      }));
     } else if (!near && dwell) {
       stopDwell();
     }
   }
   function stopDwell() {
-    if (dwell) { dwell.cancel(); dwell = null; }
-    if (scene) scene.setTargetNear(false);
+    if (dwell) { dwell.cancel(); running = running.filter(function (h) { return h !== dwell; }); dwell = null; }
+    if (scene) scene.setArc(0);
   }
-  function success() {
-    dwell = null;
-    if (mode !== 'play' || target === null) return;
-    var t = target;
-    target = null;
-    streak += 1;
-    scene.setTargetNear(false);
-    scene.pulseTarget();
+  function armStep(instant) {                       // 进入第 step 步：换提词；提词换好后才开始计时
+    stepArmed = false;
+    if (step >= STEPS.length) { hud.setPrompt('', instant); return; }
+    hud.setPrompt(STEPS[step].text, instant);
+    if (instant) { stepArmed = true; checkDwell(); return; }
+    track(Anim.delay(P.guide.promptFadeMs * 2, function () { stepArmed = true; checkDwell(); }));
+  }
+  function complete() {                             // 这一步完成：点亮一个进度点、月晕亮一下、点亮太阳那一侧的几批星
+    if (mode !== 'play') return;
+    stepArmed = false;
+    scene.setArc(1);
+    step += 1;
+    hud.setDots(step);
     scene.surge();
-    if (!drag) snapTo(t);                  // 没在拖：轻轻吸到正好的位置
-    // 天空点亮太阳那一侧的几批星（第 i 批在第1章第 i 个相位节点那一侧）
-    var i = Math.round(M.phaseFromAngle(t) * 8);
+    var i = Math.round(lit(phi).cycle * 8);
     [i - 1, i, i + 1].forEach(function (b) {
       b = ((b % 8) + 8) % 8;
       if (!litBatches[b]) { litBatches[b] = true; scene.lightBatch(b, true); }
     });
-    if (streak >= P.target.goal) { track(Anim.delay(P.target.winPauseMs, win)); return; }
-    track(Anim.delay(P.target.swapDelayMs, nextTarget));
+    if (step >= STEPS.length) { track(Anim.delay(P.guide.stepDelayMs, win)); return; }
+    track(Anim.delay(P.guide.stepDelayMs, function () { scene.setArc(0); armStep(false); }));
   }
 
-  // ---- 拖拽
-  function angleAt(pt) { return Math.atan2(pt.y - scene.sun.cy, pt.x - scene.sun.cx); }
-  function distAt(pt) { return Math.hypot(pt.x - scene.sun.cx, pt.y - scene.sun.cy); }
+  // ---- 拖拽：手指位置 → 轨道角（按椭圆归一化）
+  function phiAt(pt) { return Math.atan2((pt.y - scene.orbit.cy) / scene.orbit.ry, (pt.x - scene.orbit.cx) / scene.orbit.rx); }
+  function rhoAt(pt) { return Math.hypot((pt.x - scene.orbit.cx) / scene.orbit.rx, (pt.y - scene.orbit.cy) / scene.orbit.ry); }
 
   function onDown(e) {
-    if (mode === 'intro') { skipIntro(); return; }
-    if (mode === 'hold') { returnToPlay(); return; }
-    if (mode !== 'play' || drag) return;
+    if ((mode !== 'play' && mode !== 'done') || drag) return;
     var pt = scene.toSvgPoint(e.clientX, e.clientY);
     if (!pt) return;
-    var sx = scene.sun.cx + scene.sun.r * Math.cos(theta);
-    var sy = scene.sun.cy + scene.sun.r * Math.sin(theta);
-    var onSun = Math.hypot(pt.x - sx, pt.y - sy) <= P.sun.grabRadius;
-    var onOrbit = Math.abs(distAt(pt) - scene.sun.r) <= P.sun.grabBand;
+    var sp = scene.orbitPoint(phi), sc = scene.sunScale(lit(phi).depth);
+    var onSun = Math.hypot(pt.x - sp.x, pt.y - sp.y) <= P.sun.grabRadius * sc;
+    var op = scene.orbitPoint(phiAt(pt));
+    var onOrbit = Math.hypot(pt.x - op.x, pt.y - op.y) <= P.orbit.grabBand;
     if (!onSun && !onOrbit) return;
-    if (snapHandle) { snapHandle.cancel(); snapHandle = null; }
-    drag = { id: e.pointerId, offset: M.normAngle(theta - angleAt(pt)) };
+    drag = { id: e.pointerId, offset: M.normAngle(phi - phiAt(pt)) };
     try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 不支持就算了 */ }
     if (!hinted) { hinted = true; svg.classList.remove('hint'); }
     e.preventDefault();
@@ -144,90 +183,48 @@ window.Chapter2 = (function () {
   function onMove(e) {
     if (!drag || e.pointerId !== drag.id) return;
     e.preventDefault();
-    if (mode !== 'play') return;
+    if (mode !== 'play' && mode !== 'done') return;
     var pt = scene.toSvgPoint(e.clientX, e.clientY);
-    if (!pt || distAt(pt) < P.sun.centerDeadZone) return;
-    theta = M.normAngle(angleAt(pt) + drag.offset);
+    if (!pt || rhoAt(pt) < P.orbit.deadZone) return;
+    phi = M.normAngle(phiAt(pt) + drag.offset);
     render();
     checkDwell();
   }
   function onUp(e) {
     if (!drag || e.pointerId !== drag.id) return;
     drag = null;
-    if (mode === 'play' && target !== null && within(theta, target)) snapTo(target);   // 松手在误差内：吸到正好的位置
-  }
-  function snapTo(angle) {
-    var from = theta, delta = M.normAngle(angle - from);
-    if (Math.abs(delta) < 1e-6) return;
-    if (snapHandle) snapHandle.cancel();
-    snapHandle = track(Anim.tween({
-      ms: P.sun.snapMs, ease: Anim.ease.out,
-      onUpdate: function (t) { theta = M.normAngle(from + delta * t); render(); checkDwell(); },
-      onDone: function () { snapHandle = null; }
-    }));
   }
 
-  // ---- 过关演出（与第1章同一套：闪烁波 + 小人抬头 + 镜头落到小人身上）
+  // ---- 过关：星星波（沿用第1章），然后出现返回键（app.js 在 done 模式下露出「←」）
   function win() {
     setMode('win');
     cancelAll();
     drag = null;
-    target = null;
     progress.chapter2.completed = true;
     progress.chapter2.rounds += 1;
     save();
     hinted = true;
     svg.classList.remove('hint');
+    scene.setArc(0);
+    hud.setPrompt('', false);
     for (var i = 0; i < 8; i++) {
       if (!litBatches[i]) { litBatches[i] = true; scene.lightBatch(i, false); }
     }
     scene.setSparklesLit(true, true);
     scene.wave();
-    track(Anim.tween({ ms: P.kid.lookUpMs, ease: Anim.ease.inOut, onUpdate: function (t) { scene.setKidLook(t); } }));
-    var C = P.camera;
-    track(Anim.delay(C.winDelayMs, function () {
-      tweenCamera(scene.kidFrame(), C.winZoomMs, Anim.ease.inOut, function () {
-        setMode('hold');
-        track(Anim.delay(C.holdMs, returnToPlay));
-      });
-    }));
-  }
-  function returnToPlay() {
-    if (mode !== 'hold') return;
-    setMode('return');
-    cancelAll();
-    litBatches = {};
-    streak = 0;
-    scene.dimStars();
-    nextTarget();                          // 新的一轮：镜头拉回的路上换上新目标
-    track(Anim.tween({ ms: P.kid.lookUpMs, ease: Anim.ease.inOut, onUpdate: function (t) { scene.setKidLook(1 - t); } }));
-    tweenCamera(scene.fullFrame(), P.camera.returnZoomMs, Anim.ease.inOut, function () { setMode('play'); checkDwell(); });
+    track(Anim.delay(P.guide.winWaveMs, function () { setMode('done'); }));
   }
 
-  // ---- 开场：停在小人身上 → 拉远，看见太阳和月亮
-  function runIntro() {
-    setMode('intro');
-    setCamera(scene.kidFrame());
-    scene.setKidLook(0);
-    track(Anim.delay(P.camera.introHoldMs, function () {
-      tweenCamera(scene.fullFrame(), P.camera.introZoomMs, Anim.ease.inOut, function () { setMode('play'); checkDwell(); });
-    }));
-  }
-  function skipIntro() {
-    cancelAll();
-    setMode('return');
-    tweenCamera(scene.fullFrame(), 450, Anim.ease.out, function () { setMode('play'); checkDwell(); });
-  }
-
-  // ---- 换章节：镜头先落到小人身上（星空回暗），到了再交给 app.js 换场景
+  // ---- 换章节：提词淡出，交给 app.js 换场景（第2章没有小人，镜头不动）
   function leave(done) {
     cancelAll();
     drag = null;
     setMode('leave');
-    scene.setTargetNear(false);
+    scene.setArc(0);
+    hud.setPrompt('', false);
     scene.dimStars();
     scene.setSparklesLit(false, true);
-    tweenCamera(scene.kidFrame(), P.camera.switchZoomMs, Anim.ease.inOut, done);
+    track(Anim.delay(P.guide.promptFadeMs, done));
   }
 
   // ---- 挂到（新的）场景上；first = 首次进入本章，其余为窗口尺寸变化后重建
@@ -236,6 +233,8 @@ window.Chapter2 = (function () {
     drag = null;
     scene = newScene;
     svg = scene.svg;
+    hud.build();
+    hud.show(true);
     if (!bound) {
       bound = true;
       svg.addEventListener('pointerdown', onDown);
@@ -245,31 +244,22 @@ window.Chapter2 = (function () {
     }
     scene.setSparklesLit(progress.chapter2.completed, first);
     svg.classList.toggle('hint', !hinted);
-    if (first) {
-      theta = P.sun.startAngle; streak = 0; litBatches = {}; targetIndex = -1;
+    if (first) {                                    // 每次进入都从第一步开始（引导本身就是玩法）
+      phi = P.sun.startAngle; step = 0; litBatches = {};
+      hud.setDots(0);
       render();
-      showTarget(pickTarget());
-      runIntro();
+      setMode('play');
+      armStep(false);
       return;
     }
     // 重建：直接进入当前模式的终点状态
     scene.setLitBatches(litBatches, false);
     render();
-    if (mode === 'hold') {
-      setCamera(scene.kidFrame());
-      scene.setKidLook(1);
-      if (targetIndex >= 0) scene.setTarget(choiceAngle(targetIndex));
-      track(Anim.delay(P.camera.holdMs, returnToPlay));
-    } else {
-      if (mode === 'win' || mode === 'return') {
-        litBatches = {}; streak = 0; scene.setLitBatches(litBatches, false); scene.dimStars();
-        targetIndex = -1; target = null;
-      }
-      setMode('play');
-      scene.setKidLook(0);
-      setCamera(scene.fullFrame());
-      if (target === null) showTarget(pickTarget()); else showTarget(targetIndex);
-    }
+    if (mode === 'win') { for (var i = 0; i < 8; i++) litBatches[i] = true; scene.setLitBatches(litBatches, false); setMode('done'); }
+    if (mode === 'done' || step >= STEPS.length) { hud.setDots(STEPS.length); hud.setPrompt('', true); setMode('done'); return; }
+    setMode('play');
+    hud.setDots(step);
+    armStep(true);
   }
   function detach() {
     cancelAll();
@@ -281,8 +271,8 @@ window.Chapter2 = (function () {
       svg.removeEventListener('pointercancel', onUp);
     }
     bound = false;
+    if (hud.built) { hud.show(false); hud.setPrompt('', true); }
     mode = 'boot';
-    target = null;
   }
 
   var api = {
@@ -290,10 +280,12 @@ window.Chapter2 = (function () {
     detach: detach,
     leave: leave,
     onMode: null,
+    STEPS: STEPS,
     // 供调试 / 测试读取
     state: function () {
-      return { mode: mode, theta: theta, target: target, targetIndex: targetIndex, streak: streak,
-               dwelling: !!dwell, lit: Object.keys(litBatches).length, progress: progress.chapter2 };
+      var L = lit(phi);
+      return { mode: mode, phi: phi, depth: L.depth, fraction: L.fraction, cycle: L.cycle, step: step, armed: stepArmed,
+               dwelling: !!dwell, prompt: hud.text, lit: Object.keys(litBatches).length, progress: progress.chapter2 };
     }
   };
   return api;
