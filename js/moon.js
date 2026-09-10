@@ -78,6 +78,18 @@ window.MoonMath = (function () {
     };
   }
 
+  // 真实月相（简单朔望月算法，误差一天以内）：从 2000-01-06 18:14 UTC 那次新月起算，
+  // 按平均朔望月 29.530588853 天取模。返回第1章意义上的相位 ∈ [0, 1)：0 新月，0.5 满月。
+  var SYNODIC_DAYS = 29.530588853;
+  var REF_NEW_MOON_MS = Date.UTC(2000, 0, 6, 18, 14);
+  function phaseForDate(date) {
+    var days = ((date || new Date()).getTime() - REF_NEW_MOON_MS) / 86400000;
+    var p = (days / SYNODIC_DAYS) % 1;
+    return p < 0 ? p + 1 : p;
+  }
+  // 第2章：某个相位（第1章意义上的 cycle）对应的太阳轨道角（litFromOrbit 的反函数）
+  function orbitAngleForCycle(p) { return normAngle(p * TAU - Math.PI / 2); }
+
   // 归一到 (-π, π]
   function normAngle(a) {
     a = a % TAU;
@@ -95,6 +107,8 @@ window.MoonMath = (function () {
     angleFromPhase: angleFromPhase,
     litFromSun: litFromSun,
     litFromOrbit: litFromOrbit,
+    phaseForDate: phaseForDate,
+    orbitAngleForCycle: orbitAngleForCycle,
     normAngle: normAngle
   };
 })();
