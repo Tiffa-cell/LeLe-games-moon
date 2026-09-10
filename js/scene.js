@@ -9,8 +9,8 @@
  *
  * 两章共用天空、星、月晕、主月亮；区别：
  *   第1章：相位环（八枚小月亮 + 可拖动的那颗），主月亮亮面按相位剪裁（clipPath）；有地面和小人，有镜头往返。
- *   第2章：玩家自己的眼睛——没有地面、房子、小人，镜头不动。带俯角的椭圆轨道，太阳沿椭圆拖动：
- *          在上半段（月亮后方）变小、被月亮挡住；在下半段（月亮前方）变大、盖在月亮前面。
+ *   第2章：玩家自己的眼睛——没有地面、房子、小人，镜头不动。带俯角的椭圆轨道（宽约屏幕的 85%，纵横比 0.45，
+ *          大小与虚线样式在 theme.js 的 STYLE 里），太阳沿椭圆拖动：在上半段（月亮后方）变小，在下半段（月亮前方）变大。
  *          主月亮亮面用 <mask> 实时算出、亮面永远朝太阳。月亮外围一圈细弧线用来显示「停住 1 秒」的进度。
  *
  * 本文件不出现任何颜色值：所有填色都通过 class → CSS 变量（theme.js）引用。
@@ -70,7 +70,9 @@ window.Scene = (function () {
     var orbitOuter = orbitR + P.ring.travelerRadius + P.ring.haloExtra;
     var groundTop = VH - 408;                       // 远山最高点（M0：2388 - 1980）
     var cy = clamp(VH * P.moon.yRatio, orbitOuter + 40, groundTop - orbitOuter - 40);
-    var ORX = P.orbit.rx, ORY = P.orbit.ry;         // 第2章：椭圆轨道
+    var S = window.THEME.STYLE;                     // 尺寸 / 样式参数（theme.js）
+    var ORX = f(S.orbitWidthRatio * ref.width / 2); // 第2章：椭圆轨道——宽约屏幕宽度的 85%，纵横比 0.45
+    var ORY = f(ORX * S.orbitAspect);
     if (chapter === 2) {
       var sunOuter = (P.sun.radius + P.sun.glowExtra) * P.sun.frontScale;
       cy = clamp(VH * P.orbit.moonYRatio, ORY + sunOuter + 120, VH - ORY - sunOuter - 520);
@@ -94,8 +96,6 @@ window.Scene = (function () {
     rs.setProperty('--crater-alpha', P.moon.craterAlpha);
     rs.setProperty('--ring-alpha', P.ring.alpha);
     rs.setProperty('--trail-alpha', P.ring.trailAlpha);
-    rs.setProperty('--orbit-alpha', P.orbit.alpha);
-    rs.setProperty('--orbit-back-alpha', P.orbit.backAlpha);
     rs.setProperty('--prompt-fade-ms', P.guide.promptFadeMs + 'ms');
 
     while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -225,7 +225,7 @@ window.Scene = (function () {
     }
     if (chapter === 2) {
       lSunBack = el('g', { 'class': 'layer layer-sun-back' }, svg);
-      el('path', { d: orbitHalf(true), 'class': 'orbit-guide orbit-back', 'stroke-width': P.orbit.width, 'stroke-dasharray': P.orbit.dash }, lSunBack);
+      el('path', { d: orbitHalf(true), 'class': 'orbit-guide orbit-back', 'stroke-width': S.orbitStroke, 'stroke-dasharray': S.orbitDash }, lSunBack);
       gSun = el('g', { 'class': 'sun' }, lSunBack);
       el('circle', { r: P.sun.radius + P.sun.glowExtra, fill: 'url(#g-sun-glow)', 'class': 'sun-glow' }, gSun);
       el('circle', { r: P.sun.radius, 'class': 'sun-disc' }, gSun);
@@ -268,7 +268,7 @@ window.Scene = (function () {
     // ---- 5b 第2章：椭圆轨道的前半段（月亮前面）；太阳在前方时挂在这里，盖在月亮前面
     if (chapter === 2) {
       lSunFront = el('g', { 'class': 'layer layer-sun-front' }, svg);
-      el('path', { d: orbitHalf(false), 'class': 'orbit-guide orbit-front', 'stroke-width': P.orbit.width, 'stroke-dasharray': P.orbit.dash }, lSunFront);
+      el('path', { d: orbitHalf(false), 'class': 'orbit-guide orbit-front', 'stroke-width': S.orbitStroke, 'stroke-dasharray': S.orbitDash }, lSunFront);
     }
 
     // ---- 6 第1章：地面——圆弧山丘、小屋（暖窗）、小树、仰望的小人（第2章是玩家自己的眼睛，没有地面）
@@ -361,6 +361,10 @@ window.Scene = (function () {
     // 第2章
     function orbitPoint(phi) {            // 轨道角 phi → 椭圆上的画布坐标
       return { x: cx + ORX * Math.cos(phi), y: cy + ORY * Math.sin(phi) };
+    }
+    function orbitRay(alpha) {            // 从椭圆中心沿方位角 alpha 出发，碰到椭圆的那一点（手指「在轨道上」的判定用）
+      var r = ORX * ORY / Math.hypot(ORY * Math.cos(alpha), ORX * Math.sin(alpha));
+      return { x: cx + r * Math.cos(alpha), y: cy + r * Math.sin(alpha), r: r };
     }
     function sunScale(depth) {            // 前后深度 → 太阳缩放：正后方 backScale，正前方 frontScale，中间连续
       return P.sun.backScale + (P.sun.frontScale - P.sun.backScale) * (depth + 1) / 2;
@@ -473,7 +477,7 @@ window.Scene = (function () {
       api.setPhase = setPhase; api.setTraveler = setTraveler; api.setTrail = setTrail; api.pulseMarker = pulseMarker;
     } else {
       api.orbit = { cx: cx, cy: cy, rx: ORX, ry: ORY };
-      api.orbitPoint = orbitPoint; api.sunScale = sunScale;
+      api.orbitPoint = orbitPoint; api.orbitRay = orbitRay; api.sunScale = sunScale;
       api.setSun = setSun; api.setArc = setArc;
     }
     return api;
