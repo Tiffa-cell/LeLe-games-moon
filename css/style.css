@@ -105,14 +105,14 @@ body {
 .sun-disc    { fill: var(--c-sun); transition: fill .7s; }
 .sun-glow    { opacity: .9; }
 .hint .sun-glow { animation: breathe 2.6s ease-in-out infinite; }   /* 还没拖过时轻轻呼吸，提示可以摸 */
-.orbit-guide {
+.orbit-guide {                                /* 粗一点、亮一点的圆点虚线：轨道要明显可见（线宽、样式、不透明度在 theme.js 的 STYLE 里） */
   fill: none;
   stroke: var(--c-orbit);
   stroke-linecap: round;
-  opacity: var(--orbit-alpha);
+  opacity: var(--s-orbit-alpha);
   transition: stroke .7s;
 }
-.orbit-back { opacity: var(--orbit-back-alpha); }   /* 月亮后面那半段更淡，有远近 */
+.orbit-back { opacity: var(--s-orbit-back-alpha); }   /* 月亮后面那半段更淡，有远近 */
 .dwell-arc {                                  /* 太阳停在目标区域时，1 秒里从顶端顺时针填满；离开就清空 */
   fill: none;
   stroke: var(--c-progress);
@@ -215,83 +215,54 @@ body {
   bottom: auto;
   transform: none;
 }
-#chapter-nav.show { opacity: .7; pointer-events: auto; }
+#chapter-nav.show { opacity: .85; pointer-events: auto; }
 #chapter-nav svg { display: block; width: 32px; height: 32px; overflow: visible; }
 .nav-sun         { fill: var(--c-sun); }
 .nav-sun-ray     { stroke: var(--c-sun); stroke-width: 2.6; stroke-linecap: round; }
 .nav-moon-lit    { fill: var(--c-moon); }
 .nav-moon-outline{ fill: none; stroke: var(--c-moon); stroke-width: 1.2; opacity: .35; }
-.nav-arrow       { animation: breathe-scale 2.2s ease-in-out infinite; }
-.nav-arrow-stroke{ fill: none; stroke: var(--c-text); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+.nav-arrow       { animation: breathe-scale 2.4s ease-in-out infinite; }   /* 呼吸：轻轻放大 + 在低不透明度里起伏（幅度见 theme.js 的 STYLE） */
+.nav-arrow-stroke{ fill: none; stroke: var(--c-text); stroke-width: var(--s-arrow-stroke); stroke-linecap: round; stroke-linejoin: round; }
 @keyframes breathe-scale {
-  0%, 100% { transform: scale(1);    opacity: .55; }
-  50%      { transform: scale(1.22); opacity: 1; }
+  0%, 100% { transform: scale(1);                            opacity: var(--s-arrow-alpha); }
+  50%      { transform: scale(var(--s-arrow-breathe-scale)); opacity: var(--s-arrow-peak-alpha); }
 }
 
 /* ---- 换章节：整幅画面淡出 / 淡入 */
 #stage, #hud { transition: opacity .5s ease-in-out; }
 body.fade #stage, body.fade #hud { opacity: 0; }
 
-/* ---- 第2章的提词层：上方三个进度点、下方一句提词、底边 8 相位小月相带（颜色全走 theme.js） */
+/* ---- 第2章的提词层：顶部正中的「目标 + 进度点」部件、下方一句提词、底边 8 相位小月相带（颜色全走 theme.js） */
 #hud {
   position: fixed;
   top: 0; right: 0; bottom: 0; left: 0;
   pointer-events: none;                        /* 只是看的：手指穿过去拖太阳 */
   z-index: 1;
 }
-#hud [hidden] { display: none !important; }    /* 引导的进度点 / 一个月的小星 / 目标月相：按回合显隐（display:flex 会盖过 hidden 属性） */
-#progress {                                    /* 三个小圆点：完成一步点亮一个 */
+#hud [hidden] { display: none !important; }    /* 引导的三个点 / 一个月的目标与八个点：按回合显隐（SVG 元素也认 hidden 特性） */
+#goal {                                        /* 顶部正中：引导回合是一行 3 颗进度点；一个月回合是中央目标月相 + 环绕的 8 颗进度点（尺寸见 theme.js 的 STYLE） */
   position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 26px);
-  left: 0; right: 0;
-  display: flex;
-  justify-content: center;
-  gap: 18px;
-}
-#progress .dot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid var(--c-progress);
-  background: transparent;
-  opacity: .35;
-  transform: scale(1);
-  transition: opacity .6s ease-out, background-color .6s ease-out, transform .6s ease-out;
-}
-#progress .dot.lit { background: var(--c-progress); opacity: 1; transform: scale(1.15); }
-#month-ring {                                  /* 「一个月」：一圈 8 颗空心小星，达成一个点亮一颗 */
-  position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  top: calc(env(safe-area-inset-top, 0px) + 8px);
   left: 50%;
   transform: translateX(-50%);
-  width: 88px;
-  height: 88px;
   overflow: visible;
 }
-.ring-star {
-  fill: transparent;
-  stroke: var(--c-progress);
-  stroke-width: 1.2;
-  stroke-linejoin: round;
-  opacity: .5;
+.dot-glow-stop { stop-color: var(--c-progress); transition: stop-color .7s; }
+.dot-core {                                    /* 未点亮：暗色小圆 */
+  fill: var(--c-progress-dim);
   transform-box: fill-box;
   transform-origin: center;
-  transition: fill .6s ease-out, opacity .6s ease-out, transform .6s ease-out;
+  transition: fill .6s ease-out, transform .6s ease-out;
 }
-.ring-star.lit { fill: var(--c-progress); stroke-width: 0; opacity: 1; transform: scale(1.15); }   /* 实心时去掉描边，尖角才清楚 */
-#target {                                      /* 左上角的目标月相（和中央月亮在目标位置时一模一样） */
-  position: absolute;
-  top: calc(env(safe-area-inset-top, 0px) + 14px);
-  left: calc(env(safe-area-inset-left, 0px) + 18px);
-  width: 72px;
-  height: 72px;
-  overflow: visible;
+.dot-glow { opacity: 0; transition: opacity .6s ease-out; }
+.goal-dot.lit .dot-core { fill: var(--c-progress); transform: scale(var(--s-dot-lit-scale)); }   /* 点亮：亮点 + 光晕 */
+.goal-dot.lit .dot-glow { opacity: 1; }
+.goal-moon {                                   /* 中央的目标月相（和中央月亮在目标位置时一模一样）；换目标先淡出再淡入 */
   opacity: 1;
-  transition: opacity var(--prompt-fade-ms) ease-in-out;
+  transition: opacity var(--swap-ms) ease-in-out;
 }
-#target.out { opacity: 0; }
-.target-frame { fill: none; stroke: var(--c-orbit); stroke-width: 1; stroke-dasharray: 1 5; stroke-linecap: round; opacity: .55; }
-.target-rim   { stroke-width: 1.5; }
+.goal-moon.out { opacity: 0; }
+.goal-rim { stroke-width: 1.5; }
 #prompt {                                      /* 给念的人的提词：字号大，一次只显示一句 */
   position: absolute;
   left: 6%; right: 6%;

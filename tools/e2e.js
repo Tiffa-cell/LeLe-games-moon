@@ -1,7 +1,8 @@
 // 端到端测试（无头 Chromium）
 //   第1章：iPad 竖屏 / 横屏、逐批点亮、走满一圈的闪烁波、镜头往返、持久化、夜色切换、触摸事件
-//   第2章：[太阳][→] 入口、淡出淡入、椭圆轨道（后方变小被挡 / 前方变大盖住）、<mask> 亮面朝太阳、
-//         三步提词引导（±20° / 缺口 ≥ 25%、细弧线停 1 秒、三个进度点）、「一个月」8 个目标（小星、左上目标月相）、
+//   第2章：[太阳][→] 入口（底部正中，细线手绘感箭头）、淡出淡入、椭圆轨道（宽 85%、纵横比 0.45、粗虚线；后方变小 / 前方变大）、
+//         均匀角速度的拖动（手指方位角 = 轨道角）、<mask> 亮面朝太阳、三步提词引导（±10° / 缺口 ≥ 25%）、
+//         停住才开始的 1 秒细弧线（拖动中不计时、拖出清空）、顶部正中「目标月相 + 8 颗发光进度点」部件、
 //         今晚的真实月相、星星波、[←][小月亮] 返回、重进直接从「一个月」开始、回第1章
 // 用法：NODE_PATH=$(npm root -g) node tools/e2e.js [url] [截图目录]
 //   url 默认用 file:// 直接打开仓库里的 index.html；也可以传 http://localhost:8000/ 之类
@@ -60,7 +61,7 @@ async function waitFor(page, fn, timeout = 8000, arg) {
   while (Date.now() - t0 < timeout) { if (await page.evaluate(fn, arg)) return true; await sleep(100); }
   return false;
 }
-// 椭圆轨道上轨道角 phi 的屏幕坐标
+// 椭圆轨道上轨道角 phi 的屏幕坐标（太阳所在处）
 async function sunPoint(page, phi) {
   return page.evaluate(a => {
     const s = window.__scene, p = s.orbitPoint(a);
@@ -68,29 +69,50 @@ async function sunPoint(page, phi) {
     return { x: pt.x, y: pt.y };
   }, phi);
 }
-// 沿轨道把太阳从 from 拖到 to（走短弧）；release=false 时手指不松开
+// 均匀角速度的拖动：太阳要到轨道角 phi，手指该在哪——方位角 = phi − offset（按下时的偏移），落在轨道上
+async function fingerPoint(page, phi, offset) {
+  return page.evaluate(([p, off]) => {
+    const s = window.__scene, q = s.orbitRay(p - off);
+    const pt = new DOMPoint(q.x, q.y).matrixTransform(s.svg.getScreenCTM());
+    return { x: pt.x, y: pt.y };
+  }, [phi, offset]);
+}
+// 按在太阳上时的偏移 = 太阳的轨道角 − 太阳所在点相对中心的方位角（和 chapter2.js 的 onDown 一致）
+async function grabOffset(page, phi) {
+  return page.evaluate(p => {
+    const s = window.__scene, o = s.orbit, q = s.orbitPoint(p);
+    const a = p - Math.atan2(q.y - o.cy, q.x - o.cx);
+    return Math.atan2(Math.sin(a), Math.cos(a));
+  }, phi);
+}
+// 沿轨道把太阳从 from 拖到 to（走短弧）；release=false 时手指不松开。返回这次按下的偏移（继续拖时给 fingerPoint 用）
 async function dragSun(page, from, to, steps = 12, release = true) {
   const p0 = await sunPoint(page, from);
+  const off = await grabOffset(page, from);
   await page.mouse.move(p0.x, p0.y);
   await page.mouse.down();
   let d = to - from; d = Math.atan2(Math.sin(d), Math.cos(d));
   for (let i = 1; i <= steps; i++) {
-    const p = await sunPoint(page, from + d * i / steps);
+    const p = await fingerPoint(page, from + d * i / steps, off);
     await page.mouse.move(p.x, p.y);
   }
   if (release) await page.mouse.up();
+  return off;
 }
+const STILL_MS = 420;   // 手指停下后，「基本停住」的判定生效要等一个速度时间窗（speedWindowMs 250 + 30）；留点余量
 const navShown = page => page.evaluate(() => document.getElementById('chapter-nav').classList.contains('show'));
 const navKind = page => page.evaluate(() => document.getElementById('chapter-nav').getAttribute('data-kind'));
 const promptText = page => page.evaluate(() => document.getElementById('prompt').textContent);
 const deg = r => r * 180 / Math.PI;
-const litDots = page => page.evaluate(() => document.querySelectorAll('#progress .dot.lit').length);
+const litDots = page => page.evaluate(() => document.querySelectorAll('#goal .goal-guide .goal-dot.lit').length);
+const litRing = page => page.evaluate(() => document.querySelectorAll('#goal .goal-month .goal-dot.lit').length);
 const arcT = page => page.evaluate(() => { const a = document.querySelector('#stage .dwell-arc'); return 1 - parseFloat(a.getAttribute('stroke-dashoffset')) / parseFloat(a.getAttribute('stroke-dasharray')); });
 const sunInfo = page => page.evaluate(() => {
   const g = document.querySelector('#stage .sun');
   const m = /translate\(([-\d.]+) ([-\d.]+)\) scale\(([-\d.]+)\)/.exec(g.getAttribute('transform'));
   return { x: +m[1], y: +m[2], scale: +m[3], layer: g.parentNode.getAttribute('class'), depth: g.getAttribute('data-depth') };
 });
+const toRgb = hex => 'rgb(' + [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(', ') + ')';
 
 (async () => {
   const browser = await chromium.launch();
@@ -283,21 +305,35 @@ const sunInfo = page => page.evaluate(() => {
   await page.screenshot({ path: OUT + '/11-iphone.png' });
 
   // =====================================================================================
-  // 第2章 月亮不发光（玩家自己的眼睛：没有地面、小人、镜头往返；椭圆轨道；三步提词引导）
+  // 第2章 月亮不发光（玩家自己的眼睛：没有地面、小人、镜头往返；椭圆轨道；三步提词引导 → 一个月 → 今晚）
   // =====================================================================================
   console.log('\n--- chapter 2 ---');
   await page.setViewportSize({ width: 834, height: 1194 });
   await sleep(600);
   check((await state(page)).mode === 'play' && await navShown(page) && await navKind(page) === 'sun', 'back on iPad portrait: chapter 1 playable, sun entry shown');
   check(await page.evaluate(() => !!document.querySelector('#chapter-nav .nav-arrow[data-dir="right"]') && !!document.querySelector('#chapter-nav .nav-sun')), 'chapter 1 entry is [sun][→]');
-  check(await page.evaluate(() => getComputedStyle(document.querySelector('#chapter-nav .nav-arrow')).animationName === 'breathe-scale'), '→ breathes (scale animation)');
-  for (const key of ['sun', 'orbit', 'prompt', 'progress']) {
-    check(await page.evaluate(k => !!getComputedStyle(document.documentElement).getPropertyValue('--c-' + k).trim(), key), 'theme exposes --c-' + key);
+  // 入口位置：底部正中，箭头在太阳右侧
+  const navBox = await page.evaluate(() => {
+    const n = document.getElementById('chapter-nav'), r = n.getBoundingClientRect();
+    const sun = n.querySelector('.nav-sun').closest('svg').getBoundingClientRect(), arrow = n.querySelector('.nav-arrow').getBoundingClientRect();
+    return { cx: +(r.left + r.width / 2).toFixed(1), bottomGap: +(innerHeight - r.bottom).toFixed(1), vw: innerWidth, sunRight: +sun.right.toFixed(1), arrowLeft: +arrow.left.toFixed(1) };
+  });
+  check(Math.abs(navBox.cx - navBox.vw / 2) < 4 && navBox.bottomGap > 0 && navBox.bottomGap < 60 && navBox.arrowLeft >= navBox.sunRight - 1, 'entry sits at the bottom centre with → to the right of the sun: ' + JSON.stringify(navBox));
+  // 箭头样式：细线、圆头、略带手绘感（曲线）、低不透明度、呼吸动画
+  const arrowStyle = await page.evaluate(() => {
+    const a = document.querySelector('#chapter-nav .nav-arrow'), p = a.querySelector('.nav-arrow-stroke'), cs = getComputedStyle(p);
+    return { w: parseFloat(cs.strokeWidth), cap: cs.strokeLinecap, join: cs.strokeLinejoin, anim: getComputedStyle(a).animationName,
+             alpha: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--s-arrow-alpha')), curved: /C /.test(p.getAttribute('d')) };
+  });
+  check(arrowStyle.w <= 2 && arrowStyle.cap === 'round' && arrowStyle.join === 'round' && arrowStyle.anim === 'breathe-scale' && arrowStyle.alpha <= 0.5 && arrowStyle.curved, 'arrows are thin, round-capped, hand-drawn curves, low opacity, breathing: ' + JSON.stringify(arrowStyle));
+  for (const key of ['sun', 'orbit', 'prompt', 'progress', 'progressDim']) {
+    check(await page.evaluate(k => !!getComputedStyle(document.documentElement).getPropertyValue(window.THEME.cssVar(k)).trim(), key), 'theme exposes ' + key + ' as a CSS variable');
     for (const name of ['ink', 'indigo', 'violet']) {
       check(await page.evaluate(([n, k]) => /^#[0-9a-f]{6}$/i.test(window.THEME.PRESETS[n][k]), [name, key]), 'preset ' + name + ' has ' + key + ' color');
     }
   }
-  check(await page.evaluate(() => document.getElementById('hud').hidden), 'HUD (prompt / dots / strip) hidden in chapter 1');
+  check(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--s-orbit-width-ratio').trim() === String(window.THEME.STYLE.orbitWidthRatio) && window.THEME.STYLE.orbitAspect === 0.45), 'theme.js STYLE (sizes) exposed as --s-* variables');
+  check(await page.evaluate(() => document.getElementById('hud').hidden), 'HUD (prompt / goal widget / strip) hidden in chapter 1');
 
   // 点 [太阳][→] → 第1章镜头落到小人身上 → 淡出 → 第2章淡入（第2章没有小人，没有开场镜头）
   await page.click('#chapter-nav');
@@ -307,18 +343,27 @@ const sunInfo = page => page.evaluate(() => {
   check(await waitFor(page, () => window.__chapter === window.Chapter2, 5000), 'scene swapped to chapter 2');
   check(await waitFor(page, () => !document.body.classList.contains('fade'), 3000), 'stage fades back in');
   let s2 = await state2(page);
+  const P2 = await page.evaluate(() => ({ still: window.PARAMS.guide.stillDegPerSec, tol: window.PARAMS.guide.toleranceDeg, window: window.PARAMS.guide.speedWindowMs, moonR: window.THEME.STYLE.goalMoonR }));
+  check(P2.tol === 10 && P2.still > 0, 'tolerance is ±10°, stillness threshold ' + P2.still + '°/s over ' + P2.window + ' ms');
   check(s2.mode === 'play', 'chapter 2 starts directly in play (no kid intro), mode=' + s2.mode);
   check(await page.evaluate(() => document.getElementById('stage').getAttribute('data-chapter') === '2' && !!document.querySelector('#stage .sun-disc') && !document.querySelector('#stage .ring-guide')), 'chapter 2 scene: sun present, phase ring gone');
   check(await page.evaluate(() => !document.querySelector('#stage .layer-ground') && !document.querySelector('#stage .kid') && !document.querySelector('#stage .window')), 'no ground, no house, no kid in chapter 2');
   check(await page.evaluate(() => document.querySelectorAll('#stage .orbit-guide').length === 2 && !!document.querySelector('#stage .layer-sun-back .orbit-back') && !!document.querySelector('#stage .layer-sun-front .orbit-front')), 'elliptical orbit drawn as a back half (behind the moon) and a front half (in front)');
-  check(await page.evaluate(() => { const o = window.__scene.orbit; return o.rx > o.ry * 2 && o.ry > window.__scene.moon.r; }), 'orbit is a wide, flat ellipse: ' + JSON.stringify(await page.evaluate(() => window.__scene.orbit)));
+  const orb = await page.evaluate(() => window.__scene.orbit);
+  check(Math.abs(orb.rx * 2 / 1668 - 0.85) < 0.005 && Math.abs(orb.ry / orb.rx - 0.45) < 0.005 && orb.ry > (await page.evaluate(() => window.__scene.moon.r)), 'orbit is ~85% of the screen width with aspect 0.45: ' + JSON.stringify(orb));
+  const orbStyle = await page.evaluate(() => { const f = document.querySelector('#stage .orbit-front'), b = document.querySelector('#stage .orbit-back'); return { w: parseFloat(getComputedStyle(f).strokeWidth), front: parseFloat(getComputedStyle(f).opacity), back: parseFloat(getComputedStyle(b).opacity), dash: f.getAttribute('stroke-dasharray'), stroke: getComputedStyle(f).stroke }; });
+  const indigoP = await page.evaluate(() => window.THEME.PRESETS.indigo);
+  check(orbStyle.w >= 5 && orbStyle.front >= 0.8 && orbStyle.back >= 0.4 && orbStyle.back < orbStyle.front && orbStyle.stroke === toRgb(indigoP.orbit), 'orbit dashes are thick and high-contrast: ' + JSON.stringify(orbStyle));
   check(await page.evaluate(() => document.querySelector('#stage .layer-moon [mask]') && document.querySelector('#stage mask#mask-moon-lit path') && !document.querySelector('#stage [clip-path]')), 'big moon lit side is driven by an SVG <mask> (no clipPath, no prebuilt phase images)');
   check(await page.evaluate(() => JSON.parse(localStorage.getItem('moon.progress')).current === 2), 'current chapter persisted = 2');
   check(!(await navShown(page)), 'no return key before chapter 2 is completed');
   check(await page.evaluate(() => !document.getElementById('hud').hidden), 'HUD shown in chapter 2');
   check(await waitFor(page, () => document.getElementById('prompt').textContent === '你能找到满月吗？', 2000), 'step 1 prompt (fades in): ' + await promptText(page));
   check(await page.evaluate(() => parseFloat(getComputedStyle(document.getElementById('prompt')).fontSize) >= 26), 'prompt font is large: ' + await page.evaluate(() => getComputedStyle(document.getElementById('prompt')).fontSize));
-  check(await page.evaluate(() => document.querySelectorAll('#progress .dot').length === 3) && await litDots(page) === 0, 'three progress dots, none lit');
+  check(await page.evaluate(() => document.querySelectorAll('#goal .goal-guide .goal-dot').length === 3 && !document.querySelector('#goal .goal-guide').hasAttribute('hidden') && document.querySelector('#goal .goal-month').hasAttribute('hidden')) && await litDots(page) === 0, 'guide: three progress dots in the top widget, none lit; month ring hidden');
+  const goalPos = await page.evaluate(() => { const r = document.getElementById('goal').getBoundingClientRect(); return { cx: +(r.left + r.width / 2).toFixed(1), top: +r.top.toFixed(1), vw: innerWidth }; });
+  check(Math.abs(goalPos.cx - goalPos.vw / 2) < 3 && goalPos.top < 60, 'goal widget sits at the top centre: ' + JSON.stringify(goalPos));
+  check(await page.evaluate(() => getComputedStyle(document.querySelector('#goal .goal-guide .goal-dot .dot-core')).fill) === toRgb(indigoP.progressDim), 'unlit progress dot is the dim color');
   check(await page.evaluate(() => document.querySelectorAll('#phase-strip .strip-moon').length === 8), 'phase strip has 8 small moons');
   check(await page.evaluate(() => document.getElementById('stage').classList.contains('hint')), 'sun glow breathes before the first drag');
   check(Math.abs(s2.phi) < 1e-6 && s2.step === 0 && Math.abs(s2.fraction - 0.5) < 1e-6, 'sun starts at the right (first quarter), step 0');
@@ -327,7 +372,29 @@ const sunInfo = page => page.evaluate(() => {
   check(Math.abs(si.scale - 0.95) < 0.01 && si.layer.includes('layer-sun-back') === false && si.depth === 'front', 'sun at the side: mid scale, on the front layer');
   await page.screenshot({ path: OUT + '/12-ch2-start.png' });
 
-  // 亮面朝太阳 + 前后深度：顶 → 新月、太阳变小并躲到月亮后面；底 → 满月、太阳变大盖在月亮前面；左上 → 蛾眉月朝左上
+  // 均匀角速度：按在太阳上（正右方，偏移 0），手指绕中心转到方位角 45° → 太阳的轨道角也是 45°（旧映射会给 66°）
+  const moonC = await page.evaluate(() => window.__scene.moon);
+  {
+    const p0 = await sunPoint(page, 0);
+    await page.mouse.move(p0.x, p0.y); await page.mouse.down();
+    const q = await fingerPoint(page, Math.PI / 4, 0); await page.mouse.move(q.x, q.y); await sleep(40);
+    s2 = await state2(page);
+    check(Math.abs(s2.phi - Math.PI / 4) < 0.02, 'finger azimuth 45° → sun orbit angle 45° (uniform angular speed), got ' + deg(s2.phi).toFixed(1) + '°');
+    const si45 = await sunInfo(page), want45 = await page.evaluate(() => window.__scene.orbitPoint(Math.PI / 4));
+    check(Math.abs(si45.x - want45.x) < 0.5 && Math.abs(si45.y - want45.y) < 0.5, 'sun is projected onto the ellipse at that angle');
+    const q2 = await fingerPoint(page, Math.PI / 2, 0); await page.mouse.move(q2.x, q2.y); await sleep(40);
+    s2 = await state2(page);
+    check(Math.abs(s2.phi - Math.PI / 2) < 0.02, 'another 45° of finger → another 45° of sun (no speed-up at the ends): ' + deg(s2.phi).toFixed(1) + '°');
+    const far = await page.evaluate(() => { const s = window.__scene, o = s.orbit, a = Math.PI * 0.75; const pt = new DOMPoint(o.cx + 0.6 * o.rx * Math.cos(a), o.cy + 0.6 * o.rx * Math.sin(a)).matrixTransform(s.svg.getScreenCTM()); return { x: pt.x, y: pt.y }; });
+    await page.mouse.move(far.x, far.y); await sleep(40);
+    s2 = await state2(page);
+    check(Math.abs(s2.phi - Math.PI * 0.75) < 0.02, 'distance of the finger from the centre does not matter, only its azimuth: ' + deg(s2.phi).toFixed(1) + '°');
+    await page.mouse.up();
+    await sleep(STILL_MS);
+    check((await state2(page)).step === 0 && !(await state2(page)).dwelling, 'sweeping through the full-moon zone without stopping did not count');
+  }
+
+  // 亮面朝太阳 + 前后深度：顶 → 新月、太阳变小在月亮上方（后层）；底 → 满月、太阳变大盖在月亮前面；左上 → 蛾眉月朝左上
   const litInfo = () => page.evaluate(() => {
     const p = document.querySelector('#stage mask#mask-moon-lit path');
     const g = document.querySelector('#stage .layer-moon [mask]');
@@ -335,17 +402,16 @@ const sunInfo = page => page.evaluate(() => {
     return { d: p.getAttribute('d'), tr: p.getAttribute('transform') || '', hidden: getComputedStyle(g).visibility === 'hidden',
              glow: parseFloat(document.querySelector('#stage .moon-glow').style.opacity), sphereCx: +sp.getAttribute('cx'), sphereCy: +sp.getAttribute('cy') };
   });
-  let li = await litInfo();
-  const moonC = await page.evaluate(() => window.__scene.moon);
-  check(!li.hidden && /L /.test(li.d) && li.tr === '' && li.sphereCx > moonC.cx, 'sun at right: straight terminator (quarter), lit side toward the sun, sphere shading offset toward the sun');
-  await dragSun(page, 0, -Math.PI / 2, 10);           // 拖到椭圆最上端 = 正后方
+  s2 = await state2(page);
+  await dragSun(page, s2.phi, -Math.PI / 2, 10);           // 拖到椭圆最上端 = 正后方
   await sleep(150);
-  s2 = await state2(page); li = await litInfo(); si = await sunInfo(page);
+  s2 = await state2(page); let li = await litInfo(); si = await sunInfo(page);
   check(Math.abs(s2.phi + Math.PI / 2) < 0.02 && li.hidden && Math.abs(li.glow - 0.35) < 0.02, 'sun at the top (behind the moon): new moon, lit side hidden, glow at minimum');
-  check(Math.abs(si.scale - 0.6) < 0.01 && si.layer.includes('layer-sun-back') && si.depth === 'back', 'behind the moon: sun scaled to 0.6 and moved to the back layer (occluded by the moon)');
-  check(si.y < moonC.cy && si.y + 56 * 0.6 > moonC.cy - moonC.r, 'small sun sits above the moon, overlapping its top edge (peeks out from behind)');
+  check(Math.abs(si.scale - 0.6) < 0.01 && si.layer.includes('layer-sun-back') && si.depth === 'back', 'behind the moon: sun scaled to 0.6 and on the back layer');
+  check(si.y < moonC.cy - moonC.r, 'small sun sits above the moon (orbit is wide enough that it no longer overlaps)');
   check(!(await page.evaluate(() => document.getElementById('stage').classList.contains('hint'))), 'hint removed after first drag');
   check(await page.evaluate(() => Array.from(document.querySelectorAll('#phase-strip .strip-moon')).findIndex(g => g.classList.contains('current')) === 0), 'strip highlights new moon (index 0)');
+  await sleep(STILL_MS + 1100);
   check(await litDots(page) === 0 && (await state2(page)).step === 0, 'hiding the moon during step 1 does not count (wrong step)');
   await page.screenshot({ path: OUT + '/13-ch2-new-moon-behind.png' });
   await dragSun(page, -Math.PI / 2, -Math.PI * 3 / 4, 6); // 左上
@@ -355,20 +421,30 @@ const sunInfo = page => page.evaluate(() => {
   check(Math.abs(s2.fraction - 0.146) < 0.01, 'crescent fraction from depth: ' + s2.fraction.toFixed(3));
   await page.screenshot({ path: OUT + '/14-ch2-crescent.png' });
 
-  // 第一步：拖到正前方（椭圆最下端）→ 太阳变大盖在月亮前面 → 满月 → 细弧线 1 秒填满 → 第 1 个点亮
-  await dragSun(page, s2.phi, Math.PI / 2 + 15 * Math.PI / 180, 14);   // 误差内（+15°）
-  await sleep(250);
+  // 第一步：+15° 在 ±10° 之外——不算；+7° 在里面——手指刚停时太阳还有速度不计时，停住一个时间窗后才开始 1 秒倒计时
+  await dragSun(page, s2.phi, Math.PI / 2 + 15 * Math.PI / 180, 14);
+  await sleep(STILL_MS + 400);
+  s2 = await state2(page);
+  check(s2.step === 0 && !s2.dwelling && (await arcT(page)) < 0.01, '15° off the front is outside ±10°: no dwell, arc empty');
+  await dragSun(page, s2.phi, Math.PI / 2 + 7 * Math.PI / 180, 8, false);   // 误差内，手指按着
+  s2 = await state2(page);
+  check(s2.step === 0 && !s2.dwelling && s2.speed > P2.still, 'right after the finger stops: in the zone but not yet still (speed ' + s2.speed.toFixed(0) + '°/s) → no countdown yet');
+  await sleep(STILL_MS);
   s2 = await state2(page); li = await litInfo(); si = await sunInfo(page);
-  check(s2.step === 0 && s2.dwelling, 'within ±20° of the front: dwell (1 s) running');
-  check(!li.hidden && Math.abs(li.glow - 1) > 0.001 && s2.fraction > 0.95, 'near full moon (fraction ' + s2.fraction.toFixed(3) + ')');
+  check(s2.step === 0 && s2.dwelling && s2.speed <= P2.still, 'after a still window (speed ' + s2.speed.toFixed(1) + '°/s): 1 s countdown running');
+  check(!li.hidden && s2.fraction > 0.95, 'near full moon (fraction ' + s2.fraction.toFixed(3) + ')');
   check(si.scale > 1.25 && si.layer.includes('layer-sun-front') && si.depth === 'front' && si.y > moonC.cy, 'in front of the moon: sun scaled to ~1.3, on the front layer, below the moon centre (scale ' + si.scale + ')');
   const a1 = await arcT(page);
   await sleep(300);
   const a2 = await arcT(page);
   check(a1 > 0 && a2 > a1 && a2 < 1, 'dwell arc fills up over time: ' + a1.toFixed(2) + ' → ' + a2.toFixed(2));
   await page.screenshot({ path: OUT + '/15-ch2-dwell-arc.png' });
-  check(await waitFor(page, () => window.Chapter2.state().step === 1, 2000), 'after 1 s: step 1 complete');
+  check(await waitFor(page, () => window.Chapter2.state().step === 1, 2000), 'after 1 s (finger still down): step 1 complete');
+  await page.mouse.up();
   check(await litDots(page) === 1, 'first progress dot lit');
+  await sleep(700);
+  check(await page.evaluate(() => { const d = document.querySelector('#goal .goal-guide .goal-dot.lit'); return getComputedStyle(d.querySelector('.dot-core')).fill === getComputedStyle(document.documentElement).getPropertyValue('--c-progress').trim().replace(/^#(..)(..)(..)$/, (m, r, g, b) => 'rgb(' + [r, g, b].map(h => parseInt(h, 16)).join(', ') + ')') && parseFloat(getComputedStyle(d.querySelector('.dot-glow')).opacity) > 0.9; }), 'lit dot is bright with a visible glow (no star shapes)');
+  check(await page.evaluate(() => document.querySelectorAll('#goal path').length === document.querySelectorAll('#goal .goal-moon path').length), 'progress uses circles only, no star paths');
   check(await page.evaluate(() => document.querySelector('#stage .moon-glow').classList.contains('surge')), 'moon glow surges on completion');
   const lit1 = await litCount(page);
   check(lit1 > 0 && lit1 < N, 'some stars lit after step 1: ' + lit1);
@@ -377,84 +453,113 @@ const sunInfo = page => page.evaluate(() => {
   check(await page.evaluate(() => document.querySelectorAll('#stage .dwell-arc').length === 1 && document.querySelector('#stage .dwell-arc').style.opacity === '0'), 'arc cleared after completion');
   await page.screenshot({ path: OUT + '/16-ch2-step2.png' });
 
-  // 第二步：缺口不够（20%）不算；拖出区域弧线清空；缺口 ≥ 25% 停 1 秒算
+  // 第二步：缺口不够（20%）不算；停住后弧线开始填；拖出区域弧线清空；缺口 ≥ 25% 停 1 秒算
   s2 = await state2(page);
   await dragSun(page, s2.phi, Math.asin(0.6), 8);        // fraction 0.8 → 缺 20%
-  await sleep(700);
+  await sleep(STILL_MS + 600);
   s2 = await state2(page);
   check(s2.step === 1 && !s2.dwelling && Math.abs(s2.fraction - 0.8) < 0.02, 'gap of 20% is not enough (fraction ' + s2.fraction.toFixed(2) + '), no dwell');
-  await dragSun(page, s2.phi, Math.asin(0.3), 6, false); // fraction 0.65 → 缺 35%，手指按着
-  await sleep(500);
+  let off = await dragSun(page, s2.phi, Math.asin(0.3), 6, false); // fraction 0.65 → 缺 35%，手指按着
+  await sleep(STILL_MS + 350);
   s2 = await state2(page);
-  check(s2.dwelling && (await arcT(page)) > 0.2, 'gap of 35%: dwell running, arc filling (' + (await arcT(page)).toFixed(2) + ')');
+  check(s2.dwelling && (await arcT(page)) > 0.15, 'gap of 35%: once still, dwell running, arc filling (' + (await arcT(page)).toFixed(2) + ')');
   {                                                     // 拖回去：弧线清空
-    const p = await sunPoint(page, Math.asin(0.8)); await page.mouse.move(p.x, p.y); await sleep(200);
+    const p = await fingerPoint(page, Math.asin(0.8), off); await page.mouse.move(p.x, p.y); await sleep(200);
     s2 = await state2(page);
     check(!s2.dwelling && (await arcT(page)) < 0.01 && s2.step === 1, 'dragging back out of the region clears the arc and cancels the dwell');
-    const q = await sunPoint(page, Math.PI - Math.asin(0.3)); await page.mouse.move(q.x, q.y);   // 另一边（左）也行
+    const q = await fingerPoint(page, Math.PI - Math.asin(0.3), off); await page.mouse.move(q.x, q.y);   // 另一边（左）也行
   }
-  check(await waitFor(page, () => window.Chapter2.state().step === 2, 2500), 'holding on the other side (left, waning) with the finger down counts: step 2 complete');
+  check(await waitFor(page, () => window.Chapter2.state().step === 2, 3000), 'holding on the other side (left, waning) with the finger down counts: step 2 complete');
   await page.mouse.up();
   check(await litDots(page) === 2, 'second progress dot lit');
   check(await waitFor(page, () => document.getElementById('prompt').textContent === '能把月亮藏起来吗？' && window.Chapter2.state().armed, 3000), 'step 3 prompt appears: ' + await promptText(page));
   await page.screenshot({ path: OUT + '/17-ch2-step3.png' });
 
-  // 第三步：正后方 ±20° → 不直接过关，进入「一个月」回合：三个点换成一圈 8 颗空心小星，左上角出现目标月相
+  // 第三步：40° 外不算；在区域里来回晃 1.4 秒（拖动中）不计时、弧线不动；停下才开始计时 → 进入「一个月」
   s2 = await state2(page);
-  await dragSun(page, s2.phi, -Math.PI / 2 + 40 * Math.PI / 180, 10);   // 差 40°：不算
-  await sleep(1300);
+  await dragSun(page, s2.phi, -Math.PI / 2 + 40 * Math.PI / 180, 10);
+  await sleep(STILL_MS + 1100);
   s2 = await state2(page);
   check(s2.step === 2 && !s2.dwelling, 'holding 40° off the back does not count');
-  await dragSun(page, s2.phi, -Math.PI / 2 - 12 * Math.PI / 180, 6);    // 误差内
-  check(await waitFor(page, () => window.Chapter2.state().round === 'month', 4000), 'third step done → month round (no win yet)');
+  {
+    off = await dragSun(page, s2.phi, -Math.PI / 2, 8, false);
+    const pts = [await fingerPoint(page, -Math.PI / 2 - 8 * Math.PI / 180, off), await fingerPoint(page, -Math.PI / 2 + 8 * Math.PI / 180, off)];
+    const t0 = Date.now(); let i = 0, maxArc = 0, sawDwell = false, maxGap = 0, last = Date.now();
+    while (Date.now() - t0 < 1400) {                   // 每次只来回一次 + 一次读状态，间隔远小于速度时间窗（250 ms）
+      const p = pts[i++ % 2]; await page.mouse.move(p.x, p.y);
+      const nowT = Date.now(); maxGap = Math.max(maxGap, nowT - last); last = nowT;
+      await sleep(50);
+      const st = await page.evaluate(() => { const a = document.querySelector('#stage .dwell-arc'); return { dw: window.Chapter2.state().dwelling, arc: 1 - parseFloat(a.getAttribute('stroke-dashoffset')) / parseFloat(a.getAttribute('stroke-dasharray')) }; });
+      maxArc = Math.max(maxArc, st.arc); if (st.dw) sawDwell = true;
+    }
+    s2 = await state2(page);
+    if (maxGap < P2.window - 20) check(s2.step === 2 && !sawDwell && maxArc < 0.01 && Math.abs(s2.phi + Math.PI / 2) < 10 * Math.PI / 180, 'moving back and forth inside the ±10° zone for 1.4 s: no countdown, arc stays empty (max gap between moves ' + maxGap + ' ms)');
+    else check(s2.step === 2, 'wiggle test: harness paused ' + maxGap + ' ms between moves (longer than the still window), only checking that nothing completed');
+    const tStop = Date.now();
+    check(await waitFor(page, () => window.Chapter2.state().dwelling, 1200), 'stopping the finger (still down) starts the countdown after ' + (Date.now() - tStop) + ' ms');
+    check(await waitFor(page, () => window.Chapter2.state().round === 'month', 4000), 'third step done → month round (no win yet)');
+    await page.mouse.up();
+  }
   s2 = await state2(page);
   check(s2.mode === 'play' && s2.progress.completed === false && s2.progress.guided === true, 'not completed yet; guided flag saved: ' + JSON.stringify(s2.progress));
-  check(await page.evaluate(() => document.getElementById('progress').hidden && !document.getElementById('month-ring').hasAttribute('hidden') && document.querySelectorAll('#month-ring .ring-star').length === 8 && document.querySelectorAll('#month-ring .ring-star.lit').length === 0), 'dots replaced by a ring of 8 hollow stars');
-  check(await page.evaluate(() => getComputedStyle(document.getElementById('progress')).display === 'none' && getComputedStyle(document.getElementById('month-ring')).display !== 'none'), 'dots really not displayed, ring displayed');
-  check(await page.evaluate(() => !document.getElementById('target').hasAttribute('hidden')), 'target moon shown top-left');
+  check(await page.evaluate(() => document.querySelector('#goal .goal-guide').hasAttribute('hidden') && !document.querySelector('#goal .goal-month').hasAttribute('hidden') && document.querySelectorAll('#goal .goal-month .goal-dot').length === 8 && document.querySelectorAll('#goal .goal-month .goal-dot.lit').length === 0 && !document.querySelector('#goal .goal-moon').hasAttribute('hidden')), 'guide dots replaced by the goal widget: target moon in the centre, 8 unlit glow dots around it');
+  check(await page.evaluate(() => getComputedStyle(document.querySelector('#goal .goal-guide')).display === 'none' && getComputedStyle(document.querySelector('#goal .goal-month')).display !== 'none'), 'guide dots really not displayed, month widget displayed');
+  const goalGeo = await page.evaluate(() => {
+    const g = document.getElementById('goal').getBoundingClientRect(), m = document.querySelector('#goal .goal-moon .m-dark').getBoundingClientRect();
+    const mc = { x: m.left + m.width / 2, y: m.top + m.height / 2 };
+    const radii = Array.from(document.querySelectorAll('#goal .goal-month .goal-dot .dot-core')).map(d => { const r = d.getBoundingClientRect(); return Math.hypot(r.left + r.width / 2 - mc.x, r.top + r.height / 2 - mc.y); });
+    return { widgetCx: +(g.left + g.width / 2).toFixed(1), widgetTop: +g.top.toFixed(1), vw: innerWidth, moonDx: +(mc.x - (g.left + g.width / 2)).toFixed(1), moonDy: +(mc.y - (g.top + g.height / 2)).toFixed(1), rMin: +Math.min(...radii).toFixed(1), rMax: +Math.max(...radii).toFixed(1) };
+  });
+  check(Math.abs(goalGeo.widgetCx - goalGeo.vw / 2) < 3 && goalGeo.widgetTop < 60 && Math.abs(goalGeo.moonDx) < 1.5 && Math.abs(goalGeo.moonDy) < 1.5 && goalGeo.rMax - goalGeo.rMin < 1 && goalGeo.rMin > 35, 'widget at the top centre, target moon centred, 8 dots on a ring around it: ' + JSON.stringify(goalGeo));
   check(await litCount(page) === 0, 'sky dimmed again at the start of the month');
   check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮' && window.Chapter2.state().armed, 3000), 'month prompt: ' + await promptText(page));
   await page.screenshot({ path: OUT + '/18-ch2-month-start.png' });
 
   // 八个目标依次：新月 → 蛾眉月 → 上弦月 → 盈凸月 → 满月 → 亏凸月 → 下弦月 → 残月；目标月相 = 中央月亮在目标位置的样子
-  const targetLit = () => page.evaluate(() => { const p = document.querySelector('#target .m-lit'); return { d: p.getAttribute('d') || '', tr: p.getAttribute('transform') || '', hidden: p.style.visibility === 'hidden' }; });
-  const expectCycle = k => k / 8;
+  const targetLit = () => page.evaluate(() => { const p = document.querySelector('#goal .goal-moon .m-lit'); return { d: p.getAttribute('d') || '', tr: p.getAttribute('transform') || '', hidden: p.style.visibility === 'hidden' }; });
+  const fullRe = new RegExp('A ' + P2.moonR + ',' + P2.moonR + ' 0 0 1 [\\d.]+,[\\d.]+ A ' + P2.moonR + ',' + P2.moonR + ' 0 0 1');
   for (let k = 0; k < 8; k++) {
     check(await waitFor(page, n => window.Chapter2.state().step === n && window.Chapter2.state().armed, 3000, k), `target ${k} armed (prompt / target moon swapped)`);
     s2 = await state2(page);
-    const want = await page.evaluate(c => window.MoonMath.orbitAngleForCycle(c), expectCycle(k));
+    const want = await page.evaluate(c => window.MoonMath.orbitAngleForCycle(c), k / 8);
     check(s2.round === 'month' && s2.step === k && Math.abs(s2.target - want) < 1e-6, `target ${k} (${['新月','蛾眉月','上弦月','盈凸月','满月','亏凸月','下弦月','残月'][k]}) at orbit angle ${deg(want).toFixed(0)}°`);
     const tl = await targetLit();
     if (k === 0) check(tl.hidden, 'target moon shows a new moon (dark)');
-    if (k === 4) check(!tl.hidden && /A 26,26 0 0 1 [\d.]+,[\d.]+ A 26,26 0 0 1/.test(tl.d), 'target moon shows a full moon');
+    if (k === 4) check(!tl.hidden && fullRe.test(tl.d), 'target moon shows a full moon');
     if (k === 3) check(!tl.hidden && /rotate\(2\d/.test(tl.tr), 'target gibbous is rotated like the big moon would be (' + tl.tr + ')');
-    if (k === 1) {                                     // 误差外不算
-      await dragSun(page, s2.phi, want + 30 * Math.PI / 180, 8); await sleep(1300);
+    if (k === 1) {                                     // 误差外不算（±10°）
+      await dragSun(page, s2.phi, want + 14 * Math.PI / 180, 8); await sleep(STILL_MS + 1100);
       s2 = await state2(page);
-      check(s2.step === 1 && !s2.dwelling, 'holding 30° off the crescent target does not count');
+      check(s2.step === 1 && !s2.dwelling, 'holding 14° off the crescent target does not count (±10°)');
     }
-    if (k === 0) {                                     // 引导刚把太阳留在正后方：第一个目标（新月）不用拖，停 1 秒就算
+    if (k === 0) {                                     // 引导刚把太阳留在正后方附近：第一个目标（新月）不用拖，停 1 秒就算
       check(s2.dwelling || s2.step === 1, 'sun already at the new moon after the guide: dwell runs by itself');
+    } else if (k === 2) {                              // 手指按着、极慢地漂移（约 10°/s，低于阈值）：算「停住」，倒计时照常进行
+      off = await dragSun(page, (await state2(page)).phi, want - 6 * Math.PI / 180, 10, false);
+      const tD = Date.now();
+      for (let j = 1; j <= 12; j++) { const p = await fingerPoint(page, want + (-6 + j) * Math.PI / 180, off); await page.mouse.move(p.x, p.y); await sleep(100); }
+      check(await waitFor(page, () => window.Chapter2.state().step === 3, 1500), 'slow drift below the stillness threshold still counts as holding (completed ' + (Date.now() - tD) + ' ms after the drift began)');
+      await page.mouse.up();
     } else {
-      await dragSun(page, (await state2(page)).phi, want + (k % 2 ? 12 : -12) * Math.PI / 180, 10);
+      await dragSun(page, (await state2(page)).phi, want + (k % 2 ? 6 : -6) * Math.PI / 180, 10);
     }
     check(await waitFor(page, n => window.Chapter2.state().step === n, 3000, k + 1), `target ${k} reached after 1 s`);
-    check(await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length) === k + 1, `${k + 1} star(s) lit`);
-    if (k === 3) await page.screenshot({ path: OUT + '/19-ch2-month-4.png' });
+    check(await litRing(page) === k + 1, `${k + 1} dot(s) lit`);
+    if (k === 3) { await sleep(700); await page.screenshot({ path: OUT + '/19-ch2-month-4.png' }); }
     await sleep(1000);
   }
   const litM = await litCount(page);
   check(litM === N && (await state2(page)).lit === 8, 'each phase lit one batch of stars: all lit after 8 targets');
 
   // 最后一题：今晚的月亮 —— 目标按设备日期算真实月相
-  check(await waitFor(page, () => window.Chapter2.state().round === 'tonight' && window.Chapter2.state().armed, 4000), 'after 8 stars: tonight round');
+  check(await waitFor(page, () => window.Chapter2.state().round === 'tonight' && window.Chapter2.state().armed, 4000), 'after 8 dots: tonight round');
   s2 = await state2(page);
   check(await promptText(page) === '今晚的月亮，是什么样的？', 'tonight prompt: ' + await promptText(page));
   const tonight = await page.evaluate(() => window.MoonMath.phaseForDate(new Date()));
   check(Math.abs(s2.tonightCycle - tonight) < 0.001 && Math.abs(s2.target - (await page.evaluate(c => window.MoonMath.orbitAngleForCycle(c), tonight))) < 1e-3, 'tonight target = real phase from the device date: cycle ' + tonight.toFixed(3));
   const known = await page.evaluate(() => [window.MoonMath.phaseForDate(new Date('2024-01-11T11:57Z')), window.MoonMath.phaseForDate(new Date('2024-01-25T17:54Z')), window.MoonMath.phaseForDate(new Date('2025-01-29T12:36Z'))]);
   check(Math.min(known[0], 1 - known[0]) < 0.034 && Math.abs(known[1] - 0.5) < 0.034 && Math.min(known[2], 1 - known[2]) < 0.034, 'phaseForDate within a day of known new/full moons: ' + known.map(x => x.toFixed(3)).join(' / '));
-  check(await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 8 && !document.getElementById('target').hasAttribute('hidden')), '8 stars lit, target moon still shown');
+  check(await litRing(page) === 8 && await page.evaluate(() => !document.querySelector('#goal .goal-moon').hasAttribute('hidden')), '8 dots lit, target moon still shown in the centre');
   await page.screenshot({ path: OUT + '/20-ch2-tonight.png' });
   await dragSun(page, s2.phi, s2.target + 8 * Math.PI / 180, 12);
   check(await waitMode2(page, 'win', 4000), 'tonight reached → win');
@@ -471,8 +576,8 @@ const sunInfo = page => page.evaluate(() => {
   check(vb2 === '0 0 1668 2388', 'camera never moved in chapter 2: viewBox ' + vb2);
   check(await navShown(page) && await navKind(page) === 'moon', 'return key [←][moon] appears after the win');
   check(await page.evaluate(() => { const n = document.getElementById('chapter-nav'); return n.firstChild.classList.contains('nav-arrow') && n.firstChild.getAttribute('data-dir') === 'left' && !!n.querySelector('.nav-moon-lit'); }), '← sits to the left of the small moon');
-  check(await page.evaluate(() => getComputedStyle(document.querySelector('#chapter-nav .nav-arrow')).animationName === 'breathe-scale'), '← breathes (scale animation)');
-  check(await waitFor(page, () => document.getElementById('prompt').classList.contains('out') && document.getElementById('target').hasAttribute('hidden'), 2000), 'prompt and target hidden after the win');
+  check(await page.evaluate(() => { const a = document.querySelector('#chapter-nav .nav-arrow'), p = a.querySelector('.nav-arrow-stroke'); return getComputedStyle(a).animationName === 'breathe-scale' && parseFloat(getComputedStyle(p).strokeWidth) <= 2 && /C /.test(p.getAttribute('d')); }), '← is the same thin hand-drawn breathing arrow');
+  check(await waitFor(page, () => document.getElementById('prompt').classList.contains('out') && document.querySelector('#goal .goal-moon').hasAttribute('hidden'), 2000), 'prompt and target hidden after the win (8 lit dots stay)');
   await sleep(600);
   await page.screenshot({ path: OUT + '/22-ch2-done.png' });
   // 过关后太阳仍可自由拖
@@ -480,51 +585,52 @@ const sunInfo = page => page.evaluate(() => {
   s2 = await state2(page);
   check(s2.mode === 'done' && Math.abs(Math.abs(s2.phi) - Math.PI) < 0.05, 'sun still draggable after the win (free play)');
 
-  // 夜色切换时太阳色 / 轨道色 / 提词色 / 进度色（小星）跟着换
+  // 夜色切换时太阳色 / 轨道色 / 提词色 / 进度点色跟着换
   await page.click('.theme-dot[data-theme="ink"]'); await sleep(900);
-  const toRgb = hex => 'rgb(' + [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(', ') + ')';
   const inkP = await page.evaluate(() => window.THEME.PRESETS.ink);
   const cols = await page.evaluate(() => ({
     sun: getComputedStyle(document.querySelector('#stage .sun-disc')).fill,
     orbit: getComputedStyle(document.querySelector('#stage .orbit-front')).stroke,
     prompt: getComputedStyle(document.getElementById('prompt')).color,
-    star: getComputedStyle(document.querySelector('#month-ring .ring-star.lit')).fill,
+    dot: getComputedStyle(document.querySelector('#goal .goal-month .goal-dot.lit .dot-core')).fill,
+    dim: getComputedStyle(document.documentElement).getPropertyValue('--c-progress-dim').trim(),   // 过关后所有进度点都亮着，看变量本身
     arc: getComputedStyle(document.querySelector('#stage .dwell-arc')).stroke
   }));
-  check(cols.sun === toRgb(inkP.sun) && cols.orbit === toRgb(inkP.orbit) && cols.prompt === toRgb(inkP.prompt) && cols.star === toRgb(inkP.progress) && cols.arc === toRgb(inkP.progress), 'theme colors applied: ' + JSON.stringify(cols));
+  check(cols.sun === toRgb(inkP.sun) && cols.orbit === toRgb(inkP.orbit) && cols.prompt === toRgb(inkP.prompt) && cols.dot === toRgb(inkP.progress) && cols.dim === inkP.progressDim && cols.arc === toRgb(inkP.progress), 'theme colors applied: ' + JSON.stringify(cols));
   await page.screenshot({ path: OUT + '/23-ch2-theme-ink.png' });
   await page.click('.theme-dot[data-theme="indigo"]'); await sleep(300);
 
   // 重新加载：直接回到第2章（记住了当前章节），引导不再出现，直接从「一个月」开始；四角星在
   await page.reload(); await sleep(400);
   check(await page.evaluate(() => window.__chapter === window.Chapter2 && window.Chapter2.state().mode === 'play' && window.Chapter2.state().round === 'month' && window.Chapter2.state().step === 0), 'reload lands in chapter 2 (remembered), straight into the month round (guide only once)');
-  check(await page.evaluate(() => document.getElementById('progress').hidden && !document.getElementById('month-ring').hasAttribute('hidden') && !document.getElementById('target').hasAttribute('hidden')), 'ring + target shown, dots hidden on re-entry');
+  check(await page.evaluate(() => document.querySelector('#goal .goal-guide').hasAttribute('hidden') && !document.querySelector('#goal .goal-month').hasAttribute('hidden') && !document.querySelector('#goal .goal-moon').hasAttribute('hidden')), 'goal widget (target + ring) shown, guide dots hidden on re-entry');
   check(await page.evaluate(() => document.querySelectorAll('#stage .sparkle.lit').length) > 0, 'chapter 2 sparkles persist after reload');
-  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 0), 'month prompt, no stars lit');
+  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await litRing(page) === 0, 'month prompt, no dots lit');
   check(!(await navShown(page)), 'return key waits for this round\'s win');
   await page.screenshot({ path: OUT + '/24-ch2-reentry.png' });
 
-  // 触摸（CDP）拖太阳到正前方 → 第一步算
+  // 触摸（CDP）拖太阳到第一个目标 → 松手停住 1 秒算
   {
     const cdp = await ctx.newCDPSession(page);
     const st = await state2(page);
     const p0 = await sunPoint(page, st.phi);
+    const off0 = await grabOffset(page, st.phi);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p0.x, y: p0.y }] });
     let dd = st.target - st.phi; dd = Math.atan2(Math.sin(dd), Math.cos(dd));
     for (let i = 1; i <= 12; i++) {
-      const q = await sunPoint(page, st.phi + dd * i / 12);
+      const q = await fingerPoint(page, st.phi + dd * i / 12, off0);
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: q.x, y: q.y }] });
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     check(await waitFor(page, () => window.Chapter2.state().step === 1, 2500), 'touch drag (CDP) onto the first month target counts after 1 s');
   }
 
-  // 横屏重建：状态保留（目标序号、小星、星）
+  // 横屏重建：状态保留（目标序号、进度点、星）
   await page.setViewportSize({ width: 1194, height: 834 });
   await sleep(900);
   s2 = await state2(page);
-  check(s2.mode === 'play' && s2.round === 'month' && s2.step === 1 && await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 1) && await litCount(page) > 0 && await page.evaluate(() => !!document.querySelector('#stage .sun-disc')), 'landscape rebuild keeps chapter 2 state (month step, star, lit stars, sun)');
-  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await page.evaluate(() => !document.getElementById('target').hasAttribute('hidden')), 'prompt and target restored after rebuild');
+  check(s2.mode === 'play' && s2.round === 'month' && s2.step === 1 && await litRing(page) === 1 && await litCount(page) > 0 && await page.evaluate(() => !!document.querySelector('#stage .sun-disc')), 'landscape rebuild keeps chapter 2 state (month step, dot, lit stars, sun)');
+  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await page.evaluate(() => !document.querySelector('#goal .goal-moon').hasAttribute('hidden')), 'prompt and target restored after rebuild');
   await page.screenshot({ path: OUT + '/21-ch2-landscape.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   await sleep(700);

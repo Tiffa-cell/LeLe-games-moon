@@ -3,16 +3,18 @@
  * 目标：月亮亮的那一面永远朝着太阳。
  * 视角：玩家自己的眼睛——画面只有夜空、中央大月亮、太阳和它的椭圆轨道；没有地面、房子、小人，镜头不动。
  * 交互：拖着太阳沿椭圆轨道走（在轨道任何位置按住拖也行，可以绕一整圈）。
- *       轨道是从稍高处俯视的一个水平圆环：太阳走到上半段 = 在月亮后方（变小、被月亮挡住），
- *       走到下半段 = 在月亮前方（变大、盖在月亮前面）。中央月亮的亮面实时朝着太阳
- *       （几何在 moon.js 的 litFromOrbit；形状由 scene.js 的 <mask> 实时算出，不用预制相位图）。
- * 判定（各回合通用）：太阳进入目标区域（±20°）就开始计时，月亮外围的细弧线在 1 秒里填满即算达成；中途拖出去弧线清空。
+ *       拖动是均匀角速度：以椭圆中心为原点，手指相对中心的方位角（atan2）就是太阳的轨道角，再投影到椭圆上——
+ *       手指转多少度太阳就转多少度，不在椭圆两端加速（太阳不一定正好在手指下面，但跟手）。
+ *       轨道是从稍高处俯视的一个水平圆环：太阳走到上半段 = 在月亮后方（变小），走到下半段 = 在月亮前方（变大）。
+ *       中央月亮的亮面实时朝着太阳（几何在 moon.js 的 litFromOrbit；形状由 scene.js 的 <mask> 实时算出，不用预制相位图）。
+ * 判定（各回合通用）：太阳进入目标区域（±10°），并且手指基本停住（最近一小段时间里太阳的摆动低于阈值）之后，才开始 1 秒倒计时——
+ *       月亮外围的细弧线在 1 秒里填满即算达成；拖动中不计时；拖出区域弧线清空。
  *
  * 回合：
- *   guide  三步引导（只在首次进入本章时出现），每步屏幕下方一句提词，上方三个进度点：
+ *   guide  三步引导（只在首次进入本章时出现），每步屏幕下方一句提词，顶部三个进度点：
  *          ① 你能找到满月吗？——太阳到正前方  ② 满月是从哪一边开始变缺的？——月亮缺掉 ≥ 25%  ③ 能把月亮藏起来吗？——太阳到正后方
- *   month  「一个月」：上方换成一圈 8 颗空心小星，左上角画目标月相，提词只一句「下一个是这样的月亮」；
- *          目标依次 新月 → 蛾眉月 → 上弦月 → 盈凸月 → 满月 → 亏凸月 → 下弦月 → 残月，达成一个点亮一颗星。
+ *   month  「一个月」：顶部正中一个部件——目标月相在中央，8 颗进度点环绕；提词只一句「下一个是这样的月亮」；
+ *          目标依次 新月 → 蛾眉月 → 上弦月 → 盈凸月 → 满月 → 亏凸月 → 下弦月 → 残月，达成一个点亮一颗（暗色小圆 → 带光晕的亮点）。
  *   tonight 8 颗全亮后的最后一题「今晚的月亮，是什么样的？」：目标按设备日期算真实月相（MoonMath.phaseForDate）。
  *   达成后才过关：星星波（沿用第1章）→ 出现「←」返回键（app.js 管）。之后太阳仍可自由拖着玩。
  *   过关后重进本章直接从「一个月」开始。屏幕下方边缘一直有一条 8 相位小月相带，当前相位高亮。
@@ -21,7 +23,7 @@
  */
 window.Chapter2 = (function () {
   'use strict';
-  var M = window.MoonMath, P = window.PARAMS, Anim = window.Anim, Progress = window.Progress;
+  var M = window.MoonMath, P = window.PARAMS, Anim = window.Anim, Progress = window.Progress, S = window.THEME.STYLE;
   var FRONT = Math.PI / 2, BACK = -Math.PI / 2;      // 轨道角：正前方（满月）/ 正后方（新月）
   var NS = 'http://www.w3.org/2000/svg';
 
@@ -44,6 +46,8 @@ window.Chapter2 = (function () {
   var armed = false;              // 当前目标是否已就绪（换提词 / 换目标的间隙里不计时）
   var dwell = null;               // 「停住 1 秒」的补间（同时驱动细弧线）
   var drag = null;                // { id, offset }
+  var samples = [];               // 拖动中最近一小段时间的 { t, phi }：估太阳的角速度
+  var stillTimer = null;          // 手指停下来之后，等一个时间窗再判一次「基本停住」
   var running = [];
   var hinted = false;
   var litBatches = {};            // 本轮已点亮的星星批次
@@ -58,8 +62,10 @@ window.Chapter2 = (function () {
     running.forEach(function (h) { h.cancel(); });
     running = [];
     dwell = null;
+    if (stillTimer) { stillTimer.cancel(); stillTimer = null; }
   }
-  function lit(a) { return M.litFromOrbit(a, P.orbit.rx, P.orbit.ry); }
+  function now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+  function lit(a) { return M.litFromOrbit(a, scene.orbit.rx, scene.orbit.ry); }
   function within(a, b) { return Math.abs(M.normAngle(a - b)) <= P.guide.toleranceDeg * Math.PI / 180; }
   function el(name, attrs, parent) {
     var node = document.createElementNS(NS, name);
@@ -70,50 +76,46 @@ window.Chapter2 = (function () {
   function setHidden(node, hidden) {              // SVG 元素没有 .hidden 属性，统一用 hidden 特性（CSS 里 #hud [hidden] 管显隐）
     if (hidden) node.setAttribute('hidden', ''); else node.removeAttribute('hidden');
   }
-  function starPath(cx, cy, R) {                  // 五角星
-    var d = '', r = R * 0.45;
-    for (var i = 0; i < 10; i++) {
-      var a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r : R;
-      d += (i ? ' L ' : 'M ') + (cx + rr * Math.cos(a)).toFixed(2) + ',' + (cy + rr * Math.sin(a)).toFixed(2);
-    }
-    return d + ' Z';
+  function glowDot(parent, x, y) {                // 进度点：暗色小圆；点亮后变亮、放大、带光晕（CSS 管过渡）
+    var g = el('g', { 'class': 'goal-dot', transform: 'translate(' + x.toFixed(1) + ' ' + y.toFixed(1) + ')' }, parent);
+    el('circle', { r: S.dotGlowR, fill: 'url(#g-dot-glow)', 'class': 'dot-glow' }, g);
+    el('circle', { r: S.dotR, 'class': 'dot-core' }, g);
+    return g;
   }
 
-  // ---- HUD（HTML）：上方三个进度点 / 一圈 8 颗小星、左上角目标月相、下方一句提词、底边 8 相位小月相带
+  // ---- HUD（HTML）：顶部正中的「目标 + 进度点」部件、下方一句提词、底边 8 相位小月相带
   var hud = {
-    root: null, dots: [], ring: null, ringStars: [], targetSvg: null, targetLit: null, targetRim: null,
-    prompt: null, strip: [], built: false, text: '', fade: null, targetFade: null,
+    root: null, prompt: null, goal: null, gGuide: null, gMonth: null, guideDots: [], ringDots: [],
+    moonG: null, moonLit: null, moonRim: null, strip: [], built: false, text: '', fade: null, moonFade: null,
     build: function () {
       if (hud.built) return;
       hud.built = true;
       hud.root = document.getElementById('hud');
       hud.prompt = document.getElementById('prompt');
-      var dots = document.getElementById('progress');
-      for (var i = 0; i < STEPS.length; i++) {
-        var d = document.createElement('i');
-        d.className = 'dot';
-        dots.appendChild(d);
-        hud.dots.push(d);
-      }
-      // 一圈 8 颗空心小星：第 k 颗在 -90° + k·45°（顶端是新月那颗，顺时针）
-      var RG = P.month.ring, size = (RG.radius + RG.star) * 2 + 4, c = size / 2;
-      hud.ring = document.getElementById('month-ring');
-      hud.ring.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
-      for (var k = 0; k < 8; k++) {
+      // 顶部部件：一个方形 SVG，中央是目标月相，外面一圈 8 颗进度点；引导回合时是排成一行的 3 颗点
+      var size = (S.goalRingR + S.dotGlowR) * 2 + 8, c = size / 2;
+      hud.goal = document.getElementById('goal');
+      hud.goal.setAttribute('viewBox', '0 0 ' + size + ' ' + size);
+      hud.goal.style.width = size + 'px';
+      hud.goal.style.height = size + 'px';
+      hud.goal.style.setProperty('--swap-ms', P.month.swapMs + 'ms');
+      var defs = el('defs', {}, hud.goal);
+      var grad = el('radialGradient', { id: 'g-dot-glow' }, defs);
+      el('stop', { offset: 0.25, 'class': 'dot-glow-stop', 'stop-opacity': S.dotGlowAlpha }, grad);
+      el('stop', { offset: 1, 'class': 'dot-glow-stop', 'stop-opacity': 0 }, grad);
+      hud.gGuide = el('g', { 'class': 'goal-guide' }, hud.goal);
+      for (var i = 0; i < STEPS.length; i++) hud.guideDots.push(glowDot(hud.gGuide, c + (i - (STEPS.length - 1) / 2) * S.guideDotGap, c));
+      hud.gMonth = el('g', { 'class': 'goal-month' }, hud.goal);
+      for (var k = 0; k < 8; k++) {               // 第 k 颗在 -90° + k·45°：顶端是新月那颗，顺时针
         var a = -Math.PI / 2 + k * Math.PI / 4;
-        hud.ringStars.push(el('path', { d: starPath(c + RG.radius * Math.cos(a), c + RG.radius * Math.sin(a), RG.star), 'class': 'ring-star' }, hud.ring));
+        hud.ringDots.push(glowDot(hud.gMonth, c + S.goalRingR * Math.cos(a), c + S.goalRingR * Math.sin(a)));
       }
-      // 左上角目标月相：暗盘 + 亮面（形状和中央月亮在目标位置时一模一样）+ 新月细亮边 + 淡淡的虚线框
-      var TR = P.month.target.radius, ts = TR * 2 + 20, tc = ts / 2;
-      hud.targetSvg = document.getElementById('target');
-      hud.targetSvg.setAttribute('viewBox', '0 0 ' + ts + ' ' + ts);
-      el('circle', { cx: tc, cy: tc, r: TR + 8, 'class': 'target-frame' }, hud.targetSvg);
-      var tg = el('g', { transform: 'translate(' + tc + ' ' + tc + ')' }, hud.targetSvg);
-      el('circle', { r: TR, 'class': 'm-dark' }, tg);
-      hud.targetLit = el('path', { 'class': 'm-lit' }, tg);
-      hud.targetRim = el('circle', { r: TR - 1, 'class': 'm-rim target-rim' }, tg);
+      hud.moonG = el('g', { 'class': 'goal-moon', transform: 'translate(' + c + ' ' + c + ')' }, hud.gMonth);
+      el('circle', { r: S.goalMoonR, 'class': 'm-dark' }, hud.moonG);
+      hud.moonLit = el('path', { 'class': 'm-lit' }, hud.moonG);
+      hud.moonRim = el('circle', { r: S.goalMoonR - 1, 'class': 'm-rim goal-rim' }, hud.moonG);
       // 底边小月相带
-      var S = P.guide.strip, cell = S.cell, r = S.radius;
+      var ST = P.guide.strip, cell = ST.cell, r = ST.radius;
       var stripSvg = document.getElementById('phase-strip');
       stripSvg.setAttribute('viewBox', '0 0 ' + (cell * 8) + ' ' + cell);
       for (k = 0; k < 8; k++) {                     // 第1章意义上的八个相位：新月 → 上弦 → 满月 → 下弦 → …
@@ -127,23 +129,23 @@ window.Chapter2 = (function () {
       }
     },
     show: function (on) { hud.root.hidden = !on; hud.root.classList.toggle('show', !!on); },
-    setDots: function (n) { hud.dots.forEach(function (d, i) { d.classList.toggle('lit', i < n); }); },
-    showDots: function (on) { setHidden(document.getElementById('progress'), !on); },
-    showRing: function (on) { setHidden(hud.ring, !on); },
-    setRing: function (n) { hud.ringStars.forEach(function (s, i) { s.classList.toggle('lit', i < n); }); },
-    showTarget: function (on) { setHidden(hud.targetSvg, !on); if (!on) hud.targetSvg.classList.remove('out'); },
+    showDots: function (on) { setHidden(hud.gGuide, !on); },                                  // 引导回合的 3 颗点
+    setDots: function (n) { hud.guideDots.forEach(function (d, i) { d.classList.toggle('lit', i < n); }); },
+    showRing: function (on) { setHidden(hud.gMonth, !on); },                                  // 「一个月」的目标 + 8 颗点
+    setRing: function (n) { hud.ringDots.forEach(function (d, i) { d.classList.toggle('lit', i < n); }); },
+    showTarget: function (on) { setHidden(hud.moonG, !on); if (!on) hud.moonG.classList.remove('out'); },
     setTarget: function (angle, instant) {        // 目标月相 = 太阳在轨道角 angle 时中央月亮的样子；换目标先淡出再淡入
-      var L = lit(angle), TR = P.month.target.radius;
+      var L = lit(angle), TR = S.goalMoonR;
       var apply = function () {
         var d = M.litPath(0, 0, TR, L.phase);
-        if (d) { hud.targetLit.setAttribute('d', d); hud.targetLit.setAttribute('transform', 'rotate(' + L.rotateDeg.toFixed(1) + ')'); hud.targetLit.style.visibility = ''; }
-        else hud.targetLit.style.visibility = 'hidden';
-        hud.targetRim.style.opacity = P.moon.rimAlpha * Math.max(0, Math.min(1, 1 - L.fraction / 0.12));
+        if (d) { hud.moonLit.setAttribute('d', d); hud.moonLit.setAttribute('transform', 'rotate(' + L.rotateDeg.toFixed(1) + ')'); hud.moonLit.style.visibility = ''; }
+        else hud.moonLit.style.visibility = 'hidden';
+        hud.moonRim.style.opacity = P.moon.rimAlpha * Math.max(0, Math.min(1, 1 - L.fraction / 0.12));
       };
-      if (hud.targetFade) { hud.targetFade.cancel(); hud.targetFade = null; }
-      if (instant || hud.targetSvg.hasAttribute('hidden')) { apply(); hud.targetSvg.classList.remove('out'); return; }
-      hud.targetSvg.classList.add('out');
-      hud.targetFade = Anim.delay(P.month.swapMs, function () { hud.targetFade = null; apply(); hud.targetSvg.classList.remove('out'); });
+      if (hud.moonFade) { hud.moonFade.cancel(); hud.moonFade = null; }
+      if (instant || hud.moonG.hasAttribute('hidden')) { apply(); hud.moonG.classList.remove('out'); return; }
+      hud.moonG.classList.add('out');
+      hud.moonFade = Anim.delay(P.month.swapMs, function () { hud.moonFade = null; apply(); hud.moonG.classList.remove('out'); });
     },
     setStrip: function (cycle) {                    // 当前相位高亮
       var idx = Math.round(cycle * 8) % 8;
@@ -169,7 +171,28 @@ window.Chapter2 = (function () {
     hud.setStrip(lit(phi).cycle);
   }
 
-  // ---- 判定：当前目标区域 / 停住 1 秒（细弧线）
+  // ---- 太阳的角速度：最近 speedWindowMs 里太阳角度的摆动范围（最大 − 最小）÷ 时间（度/秒）。
+  //      用范围而不是首尾位移：来回晃也算在动（首尾位移可能正好抵消），而手指微小的抖动不会累加。手指不在屏幕上 = 太阳静止 = 0
+  function sample() {
+    var t = now();
+    samples.push({ t: t, phi: phi });
+    var keep = t - P.guide.speedWindowMs * 2;
+    while (samples.length > 2 && samples[1].t < keep) samples.shift();   // 只留时间窗内的样本（多留一个更早的当起点）
+  }
+  function speed() {
+    if (!drag || !samples.length) return 0;
+    var W = P.guide.speedWindowMs, from = now() - W, lo = 0, hi = 0;
+    for (var i = samples.length - 1; i >= 0; i--) {
+      var d = M.normAngle(samples[i].phi - phi);
+      if (d < lo) lo = d;
+      if (d > hi) hi = d;
+      if (samples[i].t <= from) break;              // 窗口起点之前的最后一个位置也算（那之后才动进窗口），再往前不看
+    }
+    return (hi - lo) * 180 / Math.PI / (W / 1000);
+  }
+  function still() { return speed() <= P.guide.stillDegPerSec; }
+
+  // ---- 判定：当前目标区域 / 停住之后才开始 1 秒倒计时（细弧线）
   function inTarget() {
     if (mode !== 'play' || !armed) return false;
     if (round === 'guide') return step < STEPS.length && STEPS[step].test(phi);
@@ -177,15 +200,22 @@ window.Chapter2 = (function () {
   }
   function checkDwell() {
     var near = inTarget();
-    if (near && !dwell) {
-      dwell = track(Anim.tween({
-        ms: P.guide.holdMs, ease: Anim.ease.linear,
-        onUpdate: function (t) { scene.setArc(t); },
-        onDone: function () { dwell = null; complete(); }
-      }));
-    } else if (!near && dwell) {
-      stopDwell();
+    if (near && still()) {
+      if (!dwell) {
+        dwell = track(Anim.tween({
+          ms: P.guide.holdMs, ease: Anim.ease.linear,
+          onUpdate: function (t) { scene.setArc(t); },
+          onDone: function () { dwell = null; complete(); }
+        }));
+      }
+      return;
     }
+    if (dwell) stopDwell();                         // 拖动中不计时 / 拖出区域：弧线清空
+    if (near) scheduleStillCheck();                 // 还在区域里但手还在动：停下来之后再判一次
+  }
+  function scheduleStillCheck() {
+    if (stillTimer) stillTimer.cancel();
+    stillTimer = Anim.delay(P.guide.speedWindowMs + 30, function () { stillTimer = null; checkDwell(); });
   }
   function stopDwell() {
     if (dwell) { dwell.cancel(); running = running.filter(function (h) { return h !== dwell; }); dwell = null; }
@@ -263,9 +293,9 @@ window.Chapter2 = (function () {
     }
   }
 
-  // ---- 拖拽：手指位置 → 轨道角（按椭圆归一化）
-  function phiAt(pt) { return Math.atan2((pt.y - scene.orbit.cy) / scene.orbit.ry, (pt.x - scene.orbit.cx) / scene.orbit.rx); }
-  function rhoAt(pt) { return Math.hypot((pt.x - scene.orbit.cx) / scene.orbit.rx, (pt.y - scene.orbit.cy) / scene.orbit.ry); }
+  // ---- 拖拽：均匀角速度——手指相对椭圆中心的方位角就是轨道角（加上按下时的偏移），再投影到椭圆上
+  function polarAt(pt) { return Math.atan2(pt.y - scene.orbit.cy, pt.x - scene.orbit.cx); }
+  function distAt(pt) { return Math.hypot(pt.x - scene.orbit.cx, pt.y - scene.orbit.cy); }
 
   function onDown(e) {
     if ((mode !== 'play' && mode !== 'done') || drag) return;
@@ -273,10 +303,11 @@ window.Chapter2 = (function () {
     if (!pt) return;
     var sp = scene.orbitPoint(phi), sc = scene.sunScale(lit(phi).depth);
     var onSun = Math.hypot(pt.x - sp.x, pt.y - sp.y) <= P.sun.grabRadius * sc;
-    var op = scene.orbitPoint(phiAt(pt));
-    var onOrbit = Math.hypot(pt.x - op.x, pt.y - op.y) <= P.orbit.grabBand;
+    var alpha = polarAt(pt);
+    var onOrbit = Math.abs(distAt(pt) - scene.orbitRay(alpha).r) <= P.orbit.grabBand;   // 沿手指的方位角量到轨道的距离
     if (!onSun && !onOrbit) return;
-    drag = { id: e.pointerId, offset: M.normAngle(phi - phiAt(pt)) };
+    drag = { id: e.pointerId, offset: M.normAngle(phi - alpha) };
+    samples = [{ t: now(), phi: phi }];
     try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 不支持就算了 */ }
     if (!hinted) { hinted = true; svg.classList.remove('hint'); }
     e.preventDefault();
@@ -286,14 +317,17 @@ window.Chapter2 = (function () {
     e.preventDefault();
     if (mode !== 'play' && mode !== 'done') return;
     var pt = scene.toSvgPoint(e.clientX, e.clientY);
-    if (!pt || rhoAt(pt) < P.orbit.deadZone) return;
-    phi = M.normAngle(phiAt(pt) + drag.offset);
+    if (!pt || distAt(pt) < P.orbit.centerDeadZone) return;
+    phi = M.normAngle(polarAt(pt) + drag.offset);
+    sample();
     render();
     checkDwell();
   }
   function onUp(e) {
     if (!drag || e.pointerId !== drag.id) return;
     drag = null;
+    samples = [];                                   // 手指离开：太阳静止
+    if (mode === 'play') checkDwell();
   }
 
   // ---- 过关：星星波（沿用第1章），然后出现返回键（app.js 在 done 模式下露出「←」）
@@ -335,6 +369,7 @@ window.Chapter2 = (function () {
   function attach(newScene, first) {
     cancelAll();
     drag = null;
+    samples = [];
     scene = newScene;
     svg = scene.svg;
     hud.build();
@@ -368,6 +403,7 @@ window.Chapter2 = (function () {
   function detach() {
     cancelAll();
     drag = null;
+    samples = [];
     if (bound && svg) {
       svg.removeEventListener('pointerdown', onDown);
       svg.removeEventListener('pointermove', onMove);
@@ -390,7 +426,7 @@ window.Chapter2 = (function () {
     state: function () {
       var L = lit(phi);
       return { mode: mode, round: round, phi: phi, depth: L.depth, fraction: L.fraction, cycle: L.cycle, step: step,
-               target: target, tonightCycle: tonightCycle, armed: armed, dwelling: !!dwell, prompt: hud.text,
+               target: target, tonightCycle: tonightCycle, armed: armed, dwelling: !!dwell, speed: speed(), prompt: hud.text,
                lit: Object.keys(litBatches).length, progress: progress.chapter2 };
     }
   };
