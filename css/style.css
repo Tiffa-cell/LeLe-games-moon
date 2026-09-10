@@ -239,6 +239,7 @@ body.fade #stage, body.fade #hud { opacity: 0; }
   pointer-events: none;                        /* 只是看的：手指穿过去拖太阳 */
   z-index: 1;
 }
+#hud [hidden] { display: none !important; }    /* 引导的进度点 / 一个月的小星 / 目标月相：按回合显隐（display:flex 会盖过 hidden 属性） */
 #progress {                                    /* 三个小圆点：完成一步点亮一个 */
   position: absolute;
   top: calc(env(safe-area-inset-top, 0px) + 26px);
@@ -258,6 +259,39 @@ body.fade #stage, body.fade #hud { opacity: 0; }
   transition: opacity .6s ease-out, background-color .6s ease-out, transform .6s ease-out;
 }
 #progress .dot.lit { background: var(--c-progress); opacity: 1; transform: scale(1.15); }
+#month-ring {                                  /* 「一个月」：一圈 8 颗空心小星，达成一个点亮一颗 */
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: 88px;
+  height: 88px;
+  overflow: visible;
+}
+.ring-star {
+  fill: transparent;
+  stroke: var(--c-progress);
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+  opacity: .5;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: fill .6s ease-out, opacity .6s ease-out, transform .6s ease-out;
+}
+.ring-star.lit { fill: var(--c-progress); stroke-width: 0; opacity: 1; transform: scale(1.15); }   /* 实心时去掉描边，尖角才清楚 */
+#target {                                      /* 左上角的目标月相（和中央月亮在目标位置时一模一样） */
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 14px);
+  left: calc(env(safe-area-inset-left, 0px) + 18px);
+  width: 72px;
+  height: 72px;
+  overflow: visible;
+  opacity: 1;
+  transition: opacity var(--prompt-fade-ms) ease-in-out;
+}
+#target.out { opacity: 0; }
+.target-frame { fill: none; stroke: var(--c-orbit); stroke-width: 1; stroke-dasharray: 1 5; stroke-linecap: round; opacity: .55; }
+.target-rim   { stroke-width: 1.5; }
 #prompt {                                      /* 给念的人的提词：字号大，一次只显示一句 */
   position: absolute;
   left: 6%; right: 6%;

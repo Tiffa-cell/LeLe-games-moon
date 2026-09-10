@@ -1,7 +1,8 @@
 // 端到端测试（无头 Chromium）
 //   第1章：iPad 竖屏 / 横屏、逐批点亮、走满一圈的闪烁波、镜头往返、持久化、夜色切换、触摸事件
 //   第2章：[太阳][→] 入口、淡出淡入、椭圆轨道（后方变小被挡 / 前方变大盖住）、<mask> 亮面朝太阳、
-//         三步提词引导（±20° / 缺口 ≥ 25%、细弧线停 1 秒、三个进度点）、星星波、[←][小月亮] 返回、回第1章
+//         三步提词引导（±20° / 缺口 ≥ 25%、细弧线停 1 秒、三个进度点）、「一个月」8 个目标（小星、左上目标月相）、
+//         今晚的真实月相、星星波、[←][小月亮] 返回、重进直接从「一个月」开始、回第1章
 // 用法：NODE_PATH=$(npm root -g) node tools/e2e.js [url] [截图目录]
 //   url 默认用 file:// 直接打开仓库里的 index.html；也可以传 http://localhost:8000/ 之类
 const path = require('path');
@@ -54,9 +55,9 @@ async function waitMode2(page, m, timeout = 15000) {
   while (Date.now() - t0 < timeout) { if ((await state2(page)).mode === m) return true; await sleep(100); }
   return false;
 }
-async function waitFor(page, fn, timeout = 8000) {
+async function waitFor(page, fn, timeout = 8000, arg) {
   const t0 = Date.now();
-  while (Date.now() - t0 < timeout) { if (await page.evaluate(fn)) return true; await sleep(100); }
+  while (Date.now() - t0 < timeout) { if (await page.evaluate(fn, arg)) return true; await sleep(100); }
   return false;
 }
 // 椭圆轨道上轨道角 phi 的屏幕坐标
@@ -82,6 +83,7 @@ async function dragSun(page, from, to, steps = 12, release = true) {
 const navShown = page => page.evaluate(() => document.getElementById('chapter-nav').classList.contains('show'));
 const navKind = page => page.evaluate(() => document.getElementById('chapter-nav').getAttribute('data-kind'));
 const promptText = page => page.evaluate(() => document.getElementById('prompt').textContent);
+const deg = r => r * 180 / Math.PI;
 const litDots = page => page.evaluate(() => document.querySelectorAll('#progress .dot.lit').length);
 const arcT = page => page.evaluate(() => { const a = document.querySelector('#stage .dwell-arc'); return 1 - parseFloat(a.getAttribute('stroke-dashoffset')) / parseFloat(a.getAttribute('stroke-dasharray')); });
 const sunInfo = page => page.evaluate(() => {
@@ -397,38 +399,88 @@ const sunInfo = page => page.evaluate(() => {
   check(await waitFor(page, () => document.getElementById('prompt').textContent === '能把月亮藏起来吗？' && window.Chapter2.state().armed, 3000), 'step 3 prompt appears: ' + await promptText(page));
   await page.screenshot({ path: OUT + '/17-ch2-step3.png' });
 
-  // 第三步：正后方 ±20° → 过关：闪烁波 + 四角星 → done → 出现 [←][小月亮]
+  // 第三步：正后方 ±20° → 不直接过关，进入「一个月」回合：三个点换成一圈 8 颗空心小星，左上角出现目标月相
   s2 = await state2(page);
   await dragSun(page, s2.phi, -Math.PI / 2 + 40 * Math.PI / 180, 10);   // 差 40°：不算
   await sleep(1300);
   s2 = await state2(page);
   check(s2.step === 2 && !s2.dwelling, 'holding 40° off the back does not count');
   await dragSun(page, s2.phi, -Math.PI / 2 - 12 * Math.PI / 180, 6);    // 误差内
-  check(await waitMode2(page, 'win', 3000), 'third step done → win');
+  check(await waitFor(page, () => window.Chapter2.state().round === 'month', 4000), 'third step done → month round (no win yet)');
   s2 = await state2(page);
-  check(await litDots(page) === 3, 'all three dots lit');
+  check(s2.mode === 'play' && s2.progress.completed === false && s2.progress.guided === true, 'not completed yet; guided flag saved: ' + JSON.stringify(s2.progress));
+  check(await page.evaluate(() => document.getElementById('progress').hidden && !document.getElementById('month-ring').hasAttribute('hidden') && document.querySelectorAll('#month-ring .ring-star').length === 8 && document.querySelectorAll('#month-ring .ring-star.lit').length === 0), 'dots replaced by a ring of 8 hollow stars');
+  check(await page.evaluate(() => getComputedStyle(document.getElementById('progress')).display === 'none' && getComputedStyle(document.getElementById('month-ring')).display !== 'none'), 'dots really not displayed, ring displayed');
+  check(await page.evaluate(() => !document.getElementById('target').hasAttribute('hidden')), 'target moon shown top-left');
+  check(await litCount(page) === 0, 'sky dimmed again at the start of the month');
+  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮' && window.Chapter2.state().armed, 3000), 'month prompt: ' + await promptText(page));
+  await page.screenshot({ path: OUT + '/18-ch2-month-start.png' });
+
+  // 八个目标依次：新月 → 蛾眉月 → 上弦月 → 盈凸月 → 满月 → 亏凸月 → 下弦月 → 残月；目标月相 = 中央月亮在目标位置的样子
+  const targetLit = () => page.evaluate(() => { const p = document.querySelector('#target .m-lit'); return { d: p.getAttribute('d') || '', tr: p.getAttribute('transform') || '', hidden: p.style.visibility === 'hidden' }; });
+  const expectCycle = k => k / 8;
+  for (let k = 0; k < 8; k++) {
+    check(await waitFor(page, n => window.Chapter2.state().step === n && window.Chapter2.state().armed, 3000, k), `target ${k} armed (prompt / target moon swapped)`);
+    s2 = await state2(page);
+    const want = await page.evaluate(c => window.MoonMath.orbitAngleForCycle(c), expectCycle(k));
+    check(s2.round === 'month' && s2.step === k && Math.abs(s2.target - want) < 1e-6, `target ${k} (${['新月','蛾眉月','上弦月','盈凸月','满月','亏凸月','下弦月','残月'][k]}) at orbit angle ${deg(want).toFixed(0)}°`);
+    const tl = await targetLit();
+    if (k === 0) check(tl.hidden, 'target moon shows a new moon (dark)');
+    if (k === 4) check(!tl.hidden && /A 26,26 0 0 1 [\d.]+,[\d.]+ A 26,26 0 0 1/.test(tl.d), 'target moon shows a full moon');
+    if (k === 3) check(!tl.hidden && /rotate\(2\d/.test(tl.tr), 'target gibbous is rotated like the big moon would be (' + tl.tr + ')');
+    if (k === 1) {                                     // 误差外不算
+      await dragSun(page, s2.phi, want + 30 * Math.PI / 180, 8); await sleep(1300);
+      s2 = await state2(page);
+      check(s2.step === 1 && !s2.dwelling, 'holding 30° off the crescent target does not count');
+    }
+    if (k === 0) {                                     // 引导刚把太阳留在正后方：第一个目标（新月）不用拖，停 1 秒就算
+      check(s2.dwelling || s2.step === 1, 'sun already at the new moon after the guide: dwell runs by itself');
+    } else {
+      await dragSun(page, (await state2(page)).phi, want + (k % 2 ? 12 : -12) * Math.PI / 180, 10);
+    }
+    check(await waitFor(page, n => window.Chapter2.state().step === n, 3000, k + 1), `target ${k} reached after 1 s`);
+    check(await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length) === k + 1, `${k + 1} star(s) lit`);
+    if (k === 3) await page.screenshot({ path: OUT + '/19-ch2-month-4.png' });
+    await sleep(1000);
+  }
+  const litM = await litCount(page);
+  check(litM === N && (await state2(page)).lit === 8, 'each phase lit one batch of stars: all lit after 8 targets');
+
+  // 最后一题：今晚的月亮 —— 目标按设备日期算真实月相
+  check(await waitFor(page, () => window.Chapter2.state().round === 'tonight' && window.Chapter2.state().armed, 4000), 'after 8 stars: tonight round');
+  s2 = await state2(page);
+  check(await promptText(page) === '今晚的月亮，是什么样的？', 'tonight prompt: ' + await promptText(page));
+  const tonight = await page.evaluate(() => window.MoonMath.phaseForDate(new Date()));
+  check(Math.abs(s2.tonightCycle - tonight) < 0.001 && Math.abs(s2.target - (await page.evaluate(c => window.MoonMath.orbitAngleForCycle(c), tonight))) < 1e-3, 'tonight target = real phase from the device date: cycle ' + tonight.toFixed(3));
+  const known = await page.evaluate(() => [window.MoonMath.phaseForDate(new Date('2024-01-11T11:57Z')), window.MoonMath.phaseForDate(new Date('2024-01-25T17:54Z')), window.MoonMath.phaseForDate(new Date('2025-01-29T12:36Z'))]);
+  check(Math.min(known[0], 1 - known[0]) < 0.034 && Math.abs(known[1] - 0.5) < 0.034 && Math.min(known[2], 1 - known[2]) < 0.034, 'phaseForDate within a day of known new/full moons: ' + known.map(x => x.toFixed(3)).join(' / '));
+  check(await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 8 && !document.getElementById('target').hasAttribute('hidden')), '8 stars lit, target moon still shown');
+  await page.screenshot({ path: OUT + '/20-ch2-tonight.png' });
+  await dragSun(page, s2.phi, s2.target + 8 * Math.PI / 180, 12);
+  check(await waitMode2(page, 'win', 4000), 'tonight reached → win');
+  s2 = await state2(page);
   check(await litCount(page) === N && s2.lit === 8, 'all stars lit on the win');
   check(await page.evaluate(() => document.querySelectorAll('#stage .star.wave').length) === N, 'star wave on every star (same as chapter 1)');
   check(await page.evaluate(() => document.querySelectorAll('#stage .sparkle.lit').length) > 0, 'sparkles appear on the first chapter 2 win');
   check(s2.progress.completed === true && s2.progress.rounds === 1, 'chapter 2 progress saved: ' + JSON.stringify(s2.progress));
   check(!(await navShown(page)), 'return key not yet shown during the wave');
   await sleep(400);
-  await page.screenshot({ path: OUT + '/18-ch2-win-wave.png' });
+  await page.screenshot({ path: OUT + '/21-ch2-win-wave.png' });
   check(await waitMode2(page, 'done', 4000), 'after the wave: done (no camera move)');
   const vb2 = await page.evaluate(() => document.getElementById('stage').getAttribute('viewBox'));
   check(vb2 === '0 0 1668 2388', 'camera never moved in chapter 2: viewBox ' + vb2);
   check(await navShown(page) && await navKind(page) === 'moon', 'return key [←][moon] appears after the win');
   check(await page.evaluate(() => { const n = document.getElementById('chapter-nav'); return n.firstChild.classList.contains('nav-arrow') && n.firstChild.getAttribute('data-dir') === 'left' && !!n.querySelector('.nav-moon-lit'); }), '← sits to the left of the small moon');
   check(await page.evaluate(() => getComputedStyle(document.querySelector('#chapter-nav .nav-arrow')).animationName === 'breathe-scale'), '← breathes (scale animation)');
-  check(await waitFor(page, () => document.getElementById('prompt').classList.contains('out'), 2000), 'prompt hidden after the win');
+  check(await waitFor(page, () => document.getElementById('prompt').classList.contains('out') && document.getElementById('target').hasAttribute('hidden'), 2000), 'prompt and target hidden after the win');
   await sleep(600);
-  await page.screenshot({ path: OUT + '/19-ch2-done.png' });
+  await page.screenshot({ path: OUT + '/22-ch2-done.png' });
   // 过关后太阳仍可自由拖
   await dragSun(page, (await state2(page)).phi, Math.PI, 8); await sleep(150);
   s2 = await state2(page);
   check(s2.mode === 'done' && Math.abs(Math.abs(s2.phi) - Math.PI) < 0.05, 'sun still draggable after the win (free play)');
 
-  // 夜色切换时太阳色 / 轨道色 / 提词色 / 进度点色跟着换
+  // 夜色切换时太阳色 / 轨道色 / 提词色 / 进度色（小星）跟着换
   await page.click('.theme-dot[data-theme="ink"]'); await sleep(900);
   const toRgb = hex => 'rgb(' + [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(', ') + ')';
   const inkP = await page.evaluate(() => window.THEME.PRESETS.ink);
@@ -436,19 +488,21 @@ const sunInfo = page => page.evaluate(() => {
     sun: getComputedStyle(document.querySelector('#stage .sun-disc')).fill,
     orbit: getComputedStyle(document.querySelector('#stage .orbit-front')).stroke,
     prompt: getComputedStyle(document.getElementById('prompt')).color,
-    dot: getComputedStyle(document.querySelector('#progress .dot.lit')).backgroundColor,
+    star: getComputedStyle(document.querySelector('#month-ring .ring-star.lit')).fill,
     arc: getComputedStyle(document.querySelector('#stage .dwell-arc')).stroke
   }));
-  check(cols.sun === toRgb(inkP.sun) && cols.orbit === toRgb(inkP.orbit) && cols.prompt === toRgb(inkP.prompt) && cols.dot === toRgb(inkP.progress) && cols.arc === toRgb(inkP.progress), 'theme colors applied: ' + JSON.stringify(cols));
-  await page.screenshot({ path: OUT + '/20-ch2-theme-ink.png' });
+  check(cols.sun === toRgb(inkP.sun) && cols.orbit === toRgb(inkP.orbit) && cols.prompt === toRgb(inkP.prompt) && cols.star === toRgb(inkP.progress) && cols.arc === toRgb(inkP.progress), 'theme colors applied: ' + JSON.stringify(cols));
+  await page.screenshot({ path: OUT + '/23-ch2-theme-ink.png' });
   await page.click('.theme-dot[data-theme="indigo"]'); await sleep(300);
 
-  // 重新加载：直接回到第2章（记住了当前章节），从第一步重新开始；四角星在
+  // 重新加载：直接回到第2章（记住了当前章节），引导不再出现，直接从「一个月」开始；四角星在
   await page.reload(); await sleep(400);
-  check(await page.evaluate(() => window.__chapter === window.Chapter2 && window.Chapter2.state().mode === 'play' && window.Chapter2.state().step === 0), 'reload lands in chapter 2 (remembered), guidance restarts at step 1');
+  check(await page.evaluate(() => window.__chapter === window.Chapter2 && window.Chapter2.state().mode === 'play' && window.Chapter2.state().round === 'month' && window.Chapter2.state().step === 0), 'reload lands in chapter 2 (remembered), straight into the month round (guide only once)');
+  check(await page.evaluate(() => document.getElementById('progress').hidden && !document.getElementById('month-ring').hasAttribute('hidden') && !document.getElementById('target').hasAttribute('hidden')), 'ring + target shown, dots hidden on re-entry');
   check(await page.evaluate(() => document.querySelectorAll('#stage .sparkle.lit').length) > 0, 'chapter 2 sparkles persist after reload');
-  check(await promptText(page) === '你能找到满月吗？' && await litDots(page) === 0, 'prompt back to step 1, dots off');
+  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 0), 'month prompt, no stars lit');
   check(!(await navShown(page)), 'return key waits for this round\'s win');
+  await page.screenshot({ path: OUT + '/24-ch2-reentry.png' });
 
   // 触摸（CDP）拖太阳到正前方 → 第一步算
   {
@@ -456,20 +510,21 @@ const sunInfo = page => page.evaluate(() => {
     const st = await state2(page);
     const p0 = await sunPoint(page, st.phi);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p0.x, y: p0.y }] });
+    let dd = st.target - st.phi; dd = Math.atan2(Math.sin(dd), Math.cos(dd));
     for (let i = 1; i <= 12; i++) {
-      const q = await sunPoint(page, st.phi + (Math.PI / 2 - st.phi) * i / 12);
+      const q = await sunPoint(page, st.phi + dd * i / 12);
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: q.x, y: q.y }] });
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    check(await waitFor(page, () => window.Chapter2.state().step === 1, 2500), 'touch drag (CDP) to the front counts after 1 s');
+    check(await waitFor(page, () => window.Chapter2.state().step === 1, 2500), 'touch drag (CDP) onto the first month target counts after 1 s');
   }
 
-  // 横屏重建：状态保留（步数、点、星）
+  // 横屏重建：状态保留（目标序号、小星、星）
   await page.setViewportSize({ width: 1194, height: 834 });
   await sleep(900);
   s2 = await state2(page);
-  check(s2.mode === 'play' && s2.step === 1 && await litDots(page) === 1 && await litCount(page) > 0 && await page.evaluate(() => !!document.querySelector('#stage .sun-disc')), 'landscape rebuild keeps chapter 2 state (step, dot, lit stars, sun)');
-  check(await waitFor(page, () => document.getElementById('prompt').textContent === '满月是从哪一边开始变缺的？', 2000), 'prompt restored after rebuild');
+  check(s2.mode === 'play' && s2.round === 'month' && s2.step === 1 && await page.evaluate(() => document.querySelectorAll('#month-ring .ring-star.lit').length === 1) && await litCount(page) > 0 && await page.evaluate(() => !!document.querySelector('#stage .sun-disc')), 'landscape rebuild keeps chapter 2 state (month step, star, lit stars, sun)');
+  check(await waitFor(page, () => document.getElementById('prompt').textContent === '下一个是这样的月亮', 2000) && await page.evaluate(() => !document.getElementById('target').hasAttribute('hidden')), 'prompt and target restored after rebuild');
   await page.screenshot({ path: OUT + '/21-ch2-landscape.png' });
   await page.setViewportSize({ width: 390, height: 844 });
   await sleep(700);
@@ -477,13 +532,18 @@ const sunInfo = page => page.evaluate(() => {
   await page.setViewportSize({ width: 834, height: 1194 });
   await sleep(700);
 
-  // 完成本轮 → [←][小月亮] → 回第1章（淡出 / 淡入，第1章从小人开场）
+  // 完成本轮（剩下 7 个目标 + 今晚）→ [←][小月亮] → 回第1章（淡出 / 淡入，第1章从小人开场）
+  for (let k = 1; k < 8; k++) {
+    check(await waitFor(page, n => window.Chapter2.state().step === n && window.Chapter2.state().armed, 3000, k), 'month target ' + k + ' armed');
+    s2 = await state2(page);
+    await dragSun(page, s2.phi, s2.target, 8);
+    check(await waitFor(page, n => window.Chapter2.state().step === n, 3000, k + 1), 'month target ' + k + ' reached');
+  }
+  check(await waitFor(page, () => window.Chapter2.state().round === 'tonight' && window.Chapter2.state().armed, 4000), 'tonight again');
   s2 = await state2(page);
-  await dragSun(page, s2.phi, Math.PI, 8);                 // 缺口 50%
-  check(await waitFor(page, () => window.Chapter2.state().step === 2, 2500), 'step 2 again');
-  await sleep(900);
-  await dragSun(page, Math.PI, -Math.PI / 2, 8);
+  await dragSun(page, s2.phi, s2.target, 10);
   check(await waitMode2(page, 'done', 6000), 'second round completed');
+  check((await state2(page)).progress.rounds === 2, 'rounds = 2');
   check(await navShown(page) && await navKind(page) === 'moon', 'return key shown');
   await page.click('#chapter-nav');
   check(await waitFor(page, () => window.__chapter === window.Chapter1, 5000), '[←] back to chapter 1');
